@@ -1,0 +1,19 @@
+version: v1
+plugins:
+  - name: go
+    out: ../pb
+    strategy: all
+    opt:
+      - paths=source_relative
+  - name: go-grpc
+    out: ../pb
+    strategy: all
+    opt:
+      - require_unimplemented_servers=false
+      - paths=source_relative
+  - name: validate
+    out: ../pb
+    strategy: all
+    opt:
+      - lang=go
+      - paths=source_relative

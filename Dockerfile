@@ -1,11 +1,15 @@
-FROM golang:1.20.2-alpine3.16 as build
+# Base image
+FROM golang:1.23-alpine AS builder
+RUN apk add make
 WORKDIR /lambda
-# Copy dependencies list
-COPY go.mod go.sum ./
-# Build
-COPY main.go .
-RUN go build -o main main.go
-# Copy artifacts to a clean image
-FROM alpine:3.16
-COPY --from=build /helloworld/main /main
-ENTRYPOINT [ "/main" ]
+COPY . /lambda
+RUN make build GOOS=linux GOARCH=arm64
+
+# Final image
+FROM alpine:latest
+RUN apk add ca-certificates
+WORKDIR /
+COPY --from=builder /lambda/build/arm64_linux/main /
+RUN chmod 777 /main
+
+CMD ["/main"]
