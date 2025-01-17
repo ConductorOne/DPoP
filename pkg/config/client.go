@@ -8,11 +8,12 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 
 	pb_connector_manager "github.com/ductone/c1-lambda/pb/c1/svc/connector_manager/v1"
 )
 
-func ConnectorManagerClient(ctx context.Context, host string) (pb_connector_manager.ConnectorManagerClient, error) {
+func ConnectorManagerClient(ctx context.Context, endpoint string) (pb_connector_manager.ConnectorManagerClient, error) {
 	systemCertPool, err := x509.SystemCertPool()
 	if err != nil || systemCertPool == nil {
 		return nil, fmt.Errorf("connector-manager-client: failed to load system cert pool: %v", err)
@@ -23,15 +24,16 @@ func ConnectorManagerClient(ctx context.Context, host string) (pb_connector_mana
 	}
 
 	creds := credentials.NewTLS(tlsConfig)
-	client, err := grpc.NewClient(host, grpc.WithTransportCredentials(creds))
+	client, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(creds))
+
 	if err != nil {
 		return nil, fmt.Errorf("connector-manager-client: failed to create client: %w", err)
 	}
 	return pb_connector_manager.NewConnectorManagerClient(client), nil
 }
 
-func GetConnectorConfig(ctx context.Context, tenantID, appID, connectorID, connectorManagerHost string) (*pb_connector_manager.GetConnectorConfigResponse, error) {
-	client, err := ConnectorManagerClient(ctx, connectorManagerHost)
+func GetConnectorConfig(ctx context.Context, endpoint string, bearer string) (*pb_connector_manager.GetConnectorConfigResponse, error) {
+	client, err := ConnectorManagerClient(ctx, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("get-connector-config: failed to create client: %w", err)
 	}
@@ -46,10 +48,8 @@ func GetConnectorConfig(ctx context.Context, tenantID, appID, connectorID, conne
 		return nil, fmt.Errorf("get-connector-config: failed to create SigV4 STS GetCallerIdentity request: %w", err)
 	}
 
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
 	return client.GetConnectorConfig(ctx, &pb_connector_manager.GetConnectorConfigRequest{
-		TenantId:                               tenantID,
-		AppId:                                  appID,
-		ConnectorId:                            connectorID,
 		Sigv4SignedRequestSTSGetCallerIdentity: signedReq,
 	})
 }

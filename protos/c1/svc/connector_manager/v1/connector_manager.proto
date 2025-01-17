@@ -12,10 +12,7 @@ service ConnectorManager {
 }
 
 message GetConnectorConfigRequest {
-  string tenant_id = 1;
-  string app_id = 2;
-  string connector_id = 3;
-  Sigv4SignedRequestSTSGetCallerIdentity sigv4SignedRequestSTSGetCallerIdentity = 4;
+  Sigv4SignedRequestSTSGetCallerIdentity sigv4SignedRequestSTSGetCallerIdentity = 1;
 }
 
 message GetConnectorConfigResponse {

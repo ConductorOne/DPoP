@@ -57,12 +57,6 @@ func (m *GetConnectorConfigRequest) validate(all bool) error {
 
 	var errors []error
 
-	// no validation rules for TenantId
-
-	// no validation rules for AppId
-
-	// no validation rules for ConnectorId
-
 	if all {
 		switch v := interface{}(m.GetSigv4SignedRequestSTSGetCallerIdentity()).(type) {
 		case interface{ ValidateAll() error }:
