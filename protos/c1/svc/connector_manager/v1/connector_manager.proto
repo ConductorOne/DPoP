@@ -2,12 +2,12 @@ syntax = "proto3";
 
 package c1.svc.connector_manager.v1;
 
-import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/ductone/c1-lambda/pb/c1/svc/connector_manager/v1";
+option go_package = "gitlab.com/ductone/c1/pkg/pb/c1/svc/connector_manager/v1";
 
-service ConnectorManager {
+service ConnectorConfigService {
   rpc GetConnectorConfig(GetConnectorConfigRequest) returns (GetConnectorConfigResponse);
 }
 
@@ -29,4 +29,3 @@ message Sigv4SignedRequestSTSGetCallerIdentity {
   repeated SignedHeader headers = 3;
   bytes body = 4;
 }
-
