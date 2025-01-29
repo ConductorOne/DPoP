@@ -11,9 +11,7 @@ service ConnectorManager {
   rpc GetConnectorConfig(GetConnectorConfigRequest) returns (GetConnectorConfigResponse);
 }
 
-message GetConnectorConfigRequest {
-  Sigv4SignedRequestSTSGetCallerIdentity sigv4SignedRequestSTSGetCallerIdentity = 1;
-}
+message GetConnectorConfigRequest {}
 
 message GetConnectorConfigResponse {
   google.protobuf.Struct config = 1;
