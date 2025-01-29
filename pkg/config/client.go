@@ -13,7 +13,7 @@ import (
 	"github.com/ductone/c1-lambda/pkg/ugrpc"
 )
 
-func GetConnectorManagerClient(ctx context.Context, endpoint string, clientID string, clientSecret string) (pb_connector_manager.ConnectorConfigServiceClient, error) {
+func GetConnectorConfigServiceClient(ctx context.Context, endpoint string, clientID string, clientSecret string) (pb_connector_manager.ConnectorConfigServiceClient, error) {
 	credProvider, clientName, _, err := ugrpc.NewC1LambdaCredentialProvider(ctx, clientID, clientSecret)
 	if err != nil {
 		return nil, err
