@@ -1,11 +1,11 @@
 syntax = "proto3";
 
-package c1.svc.connector_manager.v1;
+package c1.connectorapi.baton.v1;
 
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
-option go_package = "gitlab.com/ductone/c1/pkg/pb/c1/svc/connector_manager/v1";
+option go_package = "gitlab.com/ductone/c1/pkg/pb/c1/connectorapi/baton/v1";
 
 service ConnectorConfigService {
   rpc GetConnectorConfig(GetConnectorConfigRequest) returns (GetConnectorConfigResponse);
