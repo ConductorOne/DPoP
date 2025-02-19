@@ -46,7 +46,7 @@ func TestValidate(t *testing.T) {
 	ctx := context.Background()
 	pubKey, privKey, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	signer, err := NewDPoPSigner(privKey)
+	signer, err := NewDPoPProofer(privKey)
 	require.NoError(t, err)
 	getProof := func(method, uri, accessToken, nonce string) string {
 		proof, err := signer.Proof(method, uri, accessToken, nonce)
