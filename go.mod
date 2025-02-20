@@ -1,4 +1,4 @@
-module github.com/ConductorOne/DPoP
+module github.com/conductorone/dpop
 
 go 1.23.4
 

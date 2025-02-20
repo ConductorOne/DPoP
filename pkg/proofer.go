@@ -1,4 +1,4 @@
-package udpop
+package dpop
 
 import (
 	"crypto"
