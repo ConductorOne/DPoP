@@ -10,11 +10,10 @@ github.com/go-jose/go-jose/v4/jwt
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
-# github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
-## explicit; go 1.14
-github.com/grpc-ecosystem/go-grpc-middleware
-github.com/grpc-ecosystem/go-grpc-middleware/logging/zap/ctxzap
-github.com/grpc-ecosystem/go-grpc-middleware/tags
+# github.com/kr/pretty v0.1.0
+## explicit
+# github.com/kr/text v0.2.0
+## explicit
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -26,20 +25,6 @@ github.com/pquerna/xjwt
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/assert/yaml
 github.com/stretchr/testify/require
-# go.uber.org/multierr v1.10.0
-## explicit; go 1.19
-go.uber.org/multierr
-# go.uber.org/zap v1.27.0
-## explicit; go 1.19
-go.uber.org/zap
-go.uber.org/zap/buffer
-go.uber.org/zap/internal
-go.uber.org/zap/internal/bufferpool
-go.uber.org/zap/internal/color
-go.uber.org/zap/internal/exit
-go.uber.org/zap/internal/pool
-go.uber.org/zap/internal/stacktrace
-go.uber.org/zap/zapcore
 # golang.org/x/crypto v0.32.0
 ## explicit; go 1.20
 golang.org/x/crypto/pbkdf2
@@ -162,6 +147,8 @@ google.golang.org/protobuf/runtime/protoimpl
 google.golang.org/protobuf/types/known/anypb
 google.golang.org/protobuf/types/known/durationpb
 google.golang.org/protobuf/types/known/timestamppb
+# gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127
+## explicit
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
