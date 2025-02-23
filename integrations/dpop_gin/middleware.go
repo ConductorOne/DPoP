@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/conductorone/dpop/pkg/dpop"
 	"github.com/gin-gonic/gin"
-	"github.com/pquerna/dpop-new/pkg/dpop"
 )
 
 // ErrMissingDPoPHeader is returned when the DPoP header is missing from the request

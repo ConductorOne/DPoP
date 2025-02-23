@@ -1,6 +1,6 @@
-module github.com/pquerna/dpop-new
+module github.com/conductorone/dpop
 
-go 1.21
+go 1.23.6
 
 require (
 	github.com/go-jose/go-jose/v4 v4.0.4
@@ -12,7 +12,7 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/crypto v0.25.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
+	golang.org/x/crypto v0.34.0 // indirect
+	golang.org/x/sync v0.11.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
