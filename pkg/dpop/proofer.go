@@ -4,7 +4,9 @@ package dpop
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -29,10 +31,13 @@ const (
 
 var (
 	// ErrInvalidKey is returned when an unsupported key type is provided
-	ErrInvalidKey = errors.New("invalid key: must be an ed25519 private key or RSA private key")
+	ErrInvalidKey = errors.New("invalid key: must be an ed25519 private key, RSA private key, or ECDSA P-256 private key")
 
 	// ErrInvalidRSAKeySize is returned when an RSA key is too small
 	ErrInvalidRSAKeySize = errors.New("invalid RSA key size: must be at least 2048 bits")
+
+	// ErrInvalidECDSACurve is returned when an ECDSA key uses an unsupported curve
+	ErrInvalidECDSACurve = errors.New("invalid ECDSA curve: must be P-256")
 )
 
 // Claims represents the claims in a DPoP proof token
@@ -267,6 +272,13 @@ func NewProofer(key *jose.JSONWebKey) (*Proofer, error) {
 		if rsaKey.Size()*8 < 2048 {
 			return nil, ErrInvalidRSAKeySize
 		}
+	case *ecdsa.PrivateKey:
+		ecKey := key.Key.(*ecdsa.PrivateKey)
+		// Only support P-256 curve for now
+		if ecKey.Curve != elliptic.P256() {
+			return nil, ErrInvalidECDSACurve
+		}
+		alg = jose.ES256
 	default:
 		return nil, ErrInvalidKey
 	}
