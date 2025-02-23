@@ -1,4 +1,2 @@
 .idea
-grpc-lambda-example/.aws-sam
-grpc-lambda-example/build
 build

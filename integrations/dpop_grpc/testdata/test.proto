@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package test;
+
+option go_package = "github.com/conductorone/dpop/integrations/dpop_grpc/testdata";
+
+service TestService {
+  rpc TestUnary(TestRequest) returns (TestResponse) {}
+  rpc TestStream(stream TestRequest) returns (stream TestResponse) {}
+}
+
+message TestRequest {
+  string message = 1;
+}
+
+message TestResponse {
+  string message = 1;
+  // DPoP claims data that was validated
+  string dpop_jti = 2;
+  string dpop_htm = 3;
+  string dpop_htu = 4;
+  string dpop_nonce = 5;
+} 
