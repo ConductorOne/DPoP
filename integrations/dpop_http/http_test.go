@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/conductorone/dpop/pkg/dpop"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -43,9 +44,16 @@ func (h *testHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func TestDPoPRoundTrip(t *testing.T) {
 	// Generate a test Ed25519 key pair for DPoP proofs
-	pub, priv, err := ed25519.GenerateKey(nil)
+	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	require.NotNil(t, pub) // Keep the public key reference to prevent GC
+
+	// Create JWK for private key
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
 
 	// Create a mock token source
 	tokenSource := &mockTokenSource{
@@ -65,7 +73,7 @@ func TestDPoPRoundTrip(t *testing.T) {
 	// Create a DPoP-enabled HTTP client
 	transport, err := NewTransport(
 		http.DefaultTransport,
-		priv,
+		jwk,
 		tokenSource,
 		dpop.WithStaticNonce("test-nonce"), // Use a static nonce for testing
 	)
@@ -191,10 +199,19 @@ func TestDPoPErrorCases(t *testing.T) {
 		{
 			name: "Wrong HTTP method in proof",
 			setupClient: func() *http.Client {
-				_, priv, _ := ed25519.GenerateKey(nil)
+				pub, priv, _ := ed25519.GenerateKey(nil)
+				require.NotNil(t, pub) // Keep the public key reference to prevent GC
+
+				jwk := &jose.JSONWebKey{
+					Key:       priv,
+					KeyID:     "test-key",
+					Algorithm: string(jose.EdDSA),
+					Use:       "sig",
+				}
+
 				transport, _ := NewTransport(
 					http.DefaultTransport,
-					priv,
+					jwk,
 					&mockTokenSource{
 						token: &oauth2.Token{
 							AccessToken: "test-token",
@@ -231,8 +248,16 @@ func TestDPoPErrorCases(t *testing.T) {
 
 // TestDPoPNonceHandling tests the nonce handling functionality
 func TestDPoPNonceHandling(t *testing.T) {
-	_, priv, err := ed25519.GenerateKey(nil)
+	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
+	require.NotNil(t, pub) // Keep the public key reference to prevent GC
+
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
 
 	// Create a server that requires nonce
 	nonceValue := "server-generated-nonce"
@@ -263,7 +288,7 @@ func TestDPoPNonceHandling(t *testing.T) {
 	// Create DPoP client with the received nonce
 	transport, err := NewTransport(
 		http.DefaultTransport,
-		priv,
+		jwk,
 		&mockTokenSource{
 			token: &oauth2.Token{
 				AccessToken: "test-token",

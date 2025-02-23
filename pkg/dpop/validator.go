@@ -2,7 +2,7 @@ package dpop
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -62,7 +62,7 @@ type validationOptions struct {
 	now func() time.Time
 
 	// ExpectedPublicKey is the expected public key that should be used to sign the proof
-	expectedPublicKey interface{}
+	expectedPublicKey *jose.JSONWebKey
 }
 
 // Option is a function that configures a validationOptions
@@ -118,7 +118,7 @@ func WithNowFunc(f func() time.Time) Option {
 }
 
 // WithExpectedPublicKey sets the expected public key that should be used to sign the proof
-func WithExpectedPublicKey(key interface{}) Option {
+func WithExpectedPublicKey(key *jose.JSONWebKey) Option {
 	return func(opts *validationOptions) {
 		opts.expectedPublicKey = key
 	}
@@ -169,29 +169,47 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 		return nil, fmt.Errorf("%w: failed to parse token: %v", ErrInvalidProof, err)
 	}
 
+	if len(token.Headers) != 1 {
+		return nil, fmt.Errorf("%w: expected 1 header, got %d", ErrInvalidProof, len(token.Headers))
+	}
+
+	header := token.Headers[0]
 	// Verify the token type
-	if typ, ok := token.Headers[0].ExtraHeaders["typ"]; !ok || typ != DPoPHeaderTyp {
+	if typ, ok := header.ExtraHeaders["typ"]; !ok || typ != DPoPHeaderTyp {
 		return nil, fmt.Errorf("%w: invalid token type", ErrInvalidProof)
 	}
 
+	proofKey := header.JSONWebKey
 	// Extract the embedded JWK
-	if token.Headers[0].JSONWebKey == nil {
+	if proofKey == nil {
 		return nil, fmt.Errorf("%w: no embedded JWK", ErrInvalidProof)
 	}
 
-	// Verify key binding if configured
+	if !proofKey.IsPublic() {
+		return nil, fmt.Errorf("%w: expected public key", ErrInvalidProof)
+	}
+
+	if !proofKey.Valid() {
+		return nil, fmt.Errorf("%w: invalid JWK", ErrInvalidProof)
+	}
+
 	if v.opts.expectedPublicKey != nil {
-		// Compare the raw key bytes
-		expectedKey := v.opts.expectedPublicKey.(ed25519.PublicKey)
-		proofKey := token.Headers[0].JSONWebKey.Key.(ed25519.PublicKey)
-		if subtle.ConstantTimeCompare(expectedKey, proofKey) != 1 {
+		expectedThumbprint, err := v.opts.expectedPublicKey.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to generate expected thumbprint: %v", ErrInvalidProof, err)
+		}
+		proofThumbprint, err := proofKey.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidProof, err)
+		}
+		if subtle.ConstantTimeCompare(expectedThumbprint, proofThumbprint) != 1 {
 			return nil, fmt.Errorf("%w: invalid key binding", ErrInvalidProof)
 		}
 	}
 
 	// Verify the claims
 	var claims Claims
-	if err := token.Claims(token.Headers[0].JSONWebKey, &claims); err != nil {
+	if err := token.Claims(proofKey, &claims); err != nil {
 		return nil, fmt.Errorf("%w: failed to verify claims: %v", ErrInvalidProof, err)
 	}
 
@@ -262,6 +280,7 @@ func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, 
 	if len(claims.Claims.ID) > MaxJTISize {
 		return fmt.Errorf("%w: jti too large", ErrInvalidProof)
 	}
+
 	if claims.Claims.ID == "" {
 		return fmt.Errorf("%w: jti required but not provided", ErrInvalidProof)
 	}

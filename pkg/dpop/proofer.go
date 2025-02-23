@@ -241,32 +241,44 @@ func defaultOptions() *proofOptions {
 
 // Proofer generates DPoP proofs
 type Proofer struct {
-	key   crypto.PrivateKey
+	key   *jose.JSONWebKey
 	keyID string
 	alg   jose.SignatureAlgorithm
 }
 
 // NewProofer creates a new DPoP proofer with the given private key
-func NewProofer(key crypto.PrivateKey) (*Proofer, error) {
-	var alg jose.SignatureAlgorithm
+func NewProofer(key *jose.JSONWebKey) (*Proofer, error) {
+	if key == nil {
+		return nil, errors.New("key cannot be nil")
+	}
 
-	switch key.(type) {
+	if key.IsPublic() {
+		return nil, errors.New("key must be a private key")
+	}
+
+	var alg jose.SignatureAlgorithm
+	switch key.Key.(type) {
 	case ed25519.PrivateKey:
 		alg = jose.EdDSA
 	case *rsa.PrivateKey:
 		alg = jose.RS256
+		// Check RSA key size
+		rsaKey := key.Key.(*rsa.PrivateKey)
+		if rsaKey.Size()*8 < 2048 {
+			return nil, ErrInvalidRSAKeySize
+		}
 	default:
 		return nil, ErrInvalidKey
 	}
 
-	keyID, err := generateKeyID(key)
+	thumbprint, err := key.Thumbprint(crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate key ID: %w", err)
+		return nil, fmt.Errorf("failed to generate key thumbprint: %w", err)
 	}
 
 	return &Proofer{
 		key:   key,
-		keyID: keyID,
+		keyID: hex.EncodeToString(thumbprint),
 		alg:   alg,
 	}, nil
 }
@@ -317,21 +329,8 @@ func (p *Proofer) CreateProof(ctx context.Context, method string, url string, op
 		claims.TokenHash = hashAccessToken(options.accessToken)
 	}
 
-	var pubKey crypto.PublicKey
-	switch k := p.key.(type) {
-	case ed25519.PrivateKey:
-		pubKey = k.Public()
-	case *rsa.PrivateKey:
-		pubKey = k.Public()
-	default:
-		return "", ErrInvalidKey
-	}
-
-	publicKey := jose.JSONWebKey{
-		Key:       pubKey,
-		Algorithm: string(p.alg),
-		Use:       "sig",
-	}
+	// Create a copy of the public key
+	publicKey := p.key.Public()
 
 	signerOpts := &jose.SignerOptions{
 		EmbedJWK: false,
@@ -341,7 +340,7 @@ func (p *Proofer) CreateProof(ctx context.Context, method string, url string, op
 		},
 	}
 
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: p.alg, Key: p.key}, signerOpts)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: p.alg, Key: p.key.Key}, signerOpts)
 	if err != nil {
 		return "", fmt.Errorf("failed to create signer: %w", err)
 	}
@@ -379,21 +378,6 @@ func (p *Proofer) CreateProof(ctx context.Context, method string, url string, op
 	}
 
 	return proof, nil
-}
-
-// generateKeyID generates a key ID (thumbprint) for the given key
-func generateKeyID(key crypto.PrivateKey) (string, error) {
-	jwk := &jose.JSONWebKey{Key: key}
-	if jwk.IsPublic() {
-		return "", errors.New("invalid key: cannot generate thumbprint from public key")
-	}
-
-	thumbprint, err := jwk.Thumbprint(crypto.SHA256)
-	if err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(thumbprint), nil
 }
 
 // hashAccessToken creates a base64url-encoded SHA-256 hash of an access token

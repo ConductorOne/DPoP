@@ -3,7 +3,6 @@ package dpop
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +20,14 @@ func TestSecurityScenarios(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	proofer, err := NewProofer(priv)
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key-1",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := NewProofer(jwk)
 	require.NoError(t, err)
 
 	t.Run("replay attack prevention", func(t *testing.T) {
@@ -58,15 +64,10 @@ func TestSecurityScenarios(t *testing.T) {
 		)
 
 		// Create a JWT with wrong type
-		key := jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}
-		signer, err := jose.NewSigner(key, &jose.SignerOptions{
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
 			ExtraHeaders: map[jose.HeaderKey]interface{}{
-				"typ": "wrong+jwt", // Wrong type
-				"jwk": map[string]interface{}{
-					"kty": "OKP",
-					"crv": "Ed25519",
-					"x":   base64.RawURLEncoding.EncodeToString(pub),
-				},
+				"typ": "wrong+jwt",
+				"jwk": jwk.Public(),
 			},
 		})
 		require.NoError(t, err)
@@ -97,8 +98,7 @@ func TestSecurityScenarios(t *testing.T) {
 		)
 
 		// Create a JWT without JWK
-		key := jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}
-		signer, err := jose.NewSigner(key, &jose.SignerOptions{
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
 			ExtraHeaders: map[jose.HeaderKey]interface{}{
 				"typ": DPoPHeaderTyp,
 			},
@@ -156,11 +156,10 @@ func TestSecurityScenarios(t *testing.T) {
 		claims.Expiry = jwt.NewNumericDate(futureTime.Add(5 * time.Minute))
 
 		// Create a new signer for the modified token
-		key := jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}
-		signer, err := jose.NewSigner(key, &jose.SignerOptions{
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
 			ExtraHeaders: map[jose.HeaderKey]interface{}{
 				"typ": DPoPHeaderTyp,
-				"jwk": token.Headers[0].JSONWebKey,
+				"jwk": jwk.Public(),
 			},
 		})
 		require.NoError(t, err)

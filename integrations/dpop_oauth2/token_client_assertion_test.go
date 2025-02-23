@@ -196,14 +196,15 @@ func TestTokenSource_Token(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	jwk := &jose.JSONWebKey{
+	// Create JWKs for public and private keys
+	pubJWK := &jose.JSONWebKey{
 		Key:       pub,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
 		Use:       "sig",
 	}
 
-	clientSecret := &jose.JSONWebKey{
+	privJWK := &jose.JSONWebKey{
 		Key:       priv,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
@@ -211,7 +212,7 @@ func TestTokenSource_Token(t *testing.T) {
 	}
 
 	// Create DPoP proofer
-	proofer, err := dpop.NewProofer(priv)
+	proofer, err := dpop.NewProofer(privJWK)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -258,7 +259,7 @@ func TestTokenSource_Token(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup mock server
-			mas := newMockAuthServer(t, jwk)
+			mas := newMockAuthServer(t, pubJWK)
 			defer mas.Close()
 
 			if tc.setupServer != nil {
@@ -278,7 +279,7 @@ func TestTokenSource_Token(t *testing.T) {
 				WithNonceStore(store),
 			}
 
-			ts, err := NewTokenSource(proofer, tokenURL, "test-client", clientSecret, opts...)
+			ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK, opts...)
 			require.NoError(t, err)
 
 			// Get token
@@ -306,14 +307,15 @@ func TestTokenSource_NonceRefresh(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	jwk := &jose.JSONWebKey{
+	// Create JWKs for public and private keys
+	pubJWK := &jose.JSONWebKey{
 		Key:       pub,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
 		Use:       "sig",
 	}
 
-	clientSecret := &jose.JSONWebKey{
+	privJWK := &jose.JSONWebKey{
 		Key:       priv,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
@@ -321,11 +323,11 @@ func TestTokenSource_NonceRefresh(t *testing.T) {
 	}
 
 	// Create DPoP proofer
-	proofer, err := dpop.NewProofer(priv)
+	proofer, err := dpop.NewProofer(privJWK)
 	require.NoError(t, err)
 
 	// Setup mock server
-	mas := newMockAuthServer(t, jwk)
+	mas := newMockAuthServer(t, pubJWK)
 	defer mas.Close()
 
 	mas.enforceNonce = true
@@ -344,7 +346,7 @@ func TestTokenSource_NonceRefresh(t *testing.T) {
 		proofer,
 		tokenURL,
 		"test-client",
-		clientSecret,
+		privJWK,
 		WithHTTPClient(mas.server.Client()),
 		WithNonceStore(store),
 	)
@@ -384,14 +386,15 @@ func TestTokenSource_ReplayPrevention(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	jwk := &jose.JSONWebKey{
+	// Create JWKs for public and private keys
+	pubJWK := &jose.JSONWebKey{
 		Key:       pub,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
 		Use:       "sig",
 	}
 
-	clientSecret := &jose.JSONWebKey{
+	privJWK := &jose.JSONWebKey{
 		Key:       priv,
 		KeyID:     "test-key",
 		Algorithm: string(jose.EdDSA),
@@ -399,11 +402,11 @@ func TestTokenSource_ReplayPrevention(t *testing.T) {
 	}
 
 	// Create DPoP proofer
-	proofer, err := dpop.NewProofer(priv)
+	proofer, err := dpop.NewProofer(privJWK)
 	require.NoError(t, err)
 
 	// Setup mock server
-	mas := newMockAuthServer(t, jwk)
+	mas := newMockAuthServer(t, pubJWK)
 	defer mas.Close()
 
 	// Parse token URL
@@ -418,7 +421,7 @@ func TestTokenSource_ReplayPrevention(t *testing.T) {
 		proofer,
 		tokenURL,
 		"test-client",
-		clientSecret,
+		privJWK,
 		WithHTTPClient(mas.server.Client()),
 		WithNonceStore(store),
 	)
