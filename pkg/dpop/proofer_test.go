@@ -19,22 +19,64 @@ import (
 // TestNewProofer tests the creation of a new proofer with valid and invalid keys
 func TestNewProofer(t *testing.T) {
 	t.Run("valid ed25519 key", func(t *testing.T) {
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		require.NoError(t, err)
 
-		proofer, err := NewProofer(priv)
+		jwk := &jose.JSONWebKey{
+			Key:       priv,
+			KeyID:     "test-key-1",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
+
+		proofer, err := NewProofer(jwk)
 		require.NoError(t, err)
 		require.NotNil(t, proofer)
 
 		// Verify the key was stored
-		assert.Equal(t, priv, proofer.key)
+		assert.Equal(t, jwk, proofer.key)
 		assert.NotEmpty(t, proofer.keyID)
+
+		// Verify public key
+		pubJWK := proofer.key.Public()
+		assert.Equal(t, pub, pubJWK.Key)
 	})
 
 	t.Run("invalid key type", func(t *testing.T) {
-		proofer, err := NewProofer("invalid key")
+		jwk := &jose.JSONWebKey{
+			Key:       "invalid key",
+			KeyID:     "test-key-1",
+			Algorithm: "invalid",
+			Use:       "sig",
+		}
+
+		proofer, err := NewProofer(jwk)
 		assert.Error(t, err)
 		assert.Equal(t, ErrInvalidKey, err)
+		assert.Nil(t, proofer)
+	})
+
+	t.Run("nil key", func(t *testing.T) {
+		proofer, err := NewProofer(nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "key cannot be nil")
+		assert.Nil(t, proofer)
+	})
+
+	t.Run("public key", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+
+		jwk := &jose.JSONWebKey{
+			Key:       pub,
+			KeyID:     "test-key-1",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
+
+		proofer, err := NewProofer(jwk)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "key must be a private key")
 		assert.Nil(t, proofer)
 	})
 }
@@ -44,7 +86,14 @@ func TestCreateProof(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 
-	proofer, err := NewProofer(priv)
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key-1",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := NewProofer(jwk)
 	require.NoError(t, err)
 
 	t.Run("basic proof creation", func(t *testing.T) {
@@ -65,9 +114,9 @@ func TestCreateProof(t *testing.T) {
 		require.NoError(t, err)
 
 		var header struct {
-			Type string                 `json:"typ"`
-			Alg  string                 `json:"alg"`
-			JWK  map[string]interface{} `json:"jwk"`
+			Type string          `json:"typ"`
+			Alg  string          `json:"alg"`
+			JWK  jose.JSONWebKey `json:"jwk"`
 		}
 		err = json.Unmarshal(headerJSON, &header)
 		require.NoError(t, err)
@@ -75,6 +124,7 @@ func TestCreateProof(t *testing.T) {
 		assert.Equal(t, "dpop+jwt", header.Type)
 		assert.Equal(t, "EdDSA", header.Alg)
 		assert.NotNil(t, header.JWK)
+		assert.Equal(t, pub, header.JWK.Key)
 
 		// Decode payload
 		payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])

@@ -2,11 +2,11 @@ package dpop_grpc
 
 import (
 	"context"
-	"crypto"
 	"errors"
 	"net/url"
 
 	"github.com/conductorone/dpop/pkg/dpop"
+	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc/credentials"
 )
@@ -23,7 +23,7 @@ type DPoPCredentials struct {
 
 // NewDPoPCredentials creates a new DPoPCredentials instance
 func NewDPoPCredentials(
-	key crypto.PrivateKey,
+	key *jose.JSONWebKey,
 	tokenSource oauth2.TokenSource,
 	authority string,
 	proofOpts []dpop.ProofOption,

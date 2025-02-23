@@ -3,7 +3,6 @@ package dpop
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"fmt"
 	"strings"
 	"testing"
@@ -80,10 +79,17 @@ func TestMemoryJTIStore(t *testing.T) {
 
 func TestJTIReplayPrevention(t *testing.T) {
 	// Setup test keys and validator
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	proofer, err := NewProofer(priv)
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key-1",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := NewProofer(jwk)
 	require.NoError(t, err)
 
 	store := NewMemoryJTIStore()
@@ -176,7 +182,14 @@ func TestJTIHandling(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 
-	proofer, err := NewProofer(priv)
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key-1",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := NewProofer(jwk)
 	require.NoError(t, err)
 
 	t.Run("basic JTI validation", func(t *testing.T) {

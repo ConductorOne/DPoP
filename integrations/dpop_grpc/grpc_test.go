@@ -93,6 +93,14 @@ func TestDPoPGRPC(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pub)
 
+	// Create JWK for private key
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
 	// Create a static nonce generator for testing
 	staticNonce := func(ctx context.Context) (string, error) {
 		return "test-nonce", nil
@@ -155,7 +163,7 @@ func TestDPoPGRPC(t *testing.T) {
 	}
 
 	// Create client credentials with DPoP
-	creds, err := NewDPoPCredentials(priv, tokenSource, "test-endpoint", []dpop.ProofOption{
+	creds, err := NewDPoPCredentials(jwk, tokenSource, "test-endpoint", []dpop.ProofOption{
 		dpop.WithStaticNonce("test-nonce"),
 		dpop.WithValidityDuration(time.Minute * 5),
 		dpop.WithProofNowFunc(func() time.Time {
@@ -262,6 +270,13 @@ func TestDPoPGRPCErrors(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, pub)
 
+		jwk := &jose.JSONWebKey{
+			Key:       priv,
+			KeyID:     "test-key",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
+
 		tokenSource := &mockTokenSource{
 			token: &oauth2.Token{
 				AccessToken: "test-access-token",
@@ -271,7 +286,7 @@ func TestDPoPGRPCErrors(t *testing.T) {
 		}
 
 		// Create credentials with an old timestamp
-		creds, err := NewDPoPCredentials(priv, tokenSource, "test-endpoint", []dpop.ProofOption{
+		creds, err := NewDPoPCredentials(jwk, tokenSource, "test-endpoint", []dpop.ProofOption{
 			dpop.WithProofNowFunc(func() time.Time {
 				return time.Now().Add(-24 * time.Hour)
 			}),
@@ -310,6 +325,14 @@ func TestClientInterceptors(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	require.NotNil(t, pub)
+
+	// Create JWK for private key
+	jwk := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
 
 	// Create a static nonce generator for testing
 	staticNonce := func(ctx context.Context) (string, error) {
@@ -373,7 +396,7 @@ func TestClientInterceptors(t *testing.T) {
 	}
 
 	// Create client interceptors
-	unaryInterceptor, err := ClientUnaryInterceptor(priv, tokenSource, []dpop.ProofOption{
+	unaryInterceptor, err := ClientUnaryInterceptor(jwk, tokenSource, []dpop.ProofOption{
 		dpop.WithStaticNonce("test-nonce"),
 		dpop.WithValidityDuration(time.Minute * 5),
 		dpop.WithProofNowFunc(func() time.Time {
@@ -382,7 +405,7 @@ func TestClientInterceptors(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	streamInterceptor, err := ClientStreamInterceptor(priv, tokenSource, []dpop.ProofOption{
+	streamInterceptor, err := ClientStreamInterceptor(jwk, tokenSource, []dpop.ProofOption{
 		dpop.WithStaticNonce("test-nonce"),
 		dpop.WithValidityDuration(time.Minute * 5),
 		dpop.WithProofNowFunc(func() time.Time {
@@ -470,18 +493,31 @@ func TestClientInterceptorErrors(t *testing.T) {
 
 	t.Run("Invalid private key", func(t *testing.T) {
 		// Try to create interceptors with an invalid key
-		invalidKey := []byte("invalid-key")
-		_, err := ClientUnaryInterceptor(invalidKey, nil, nil)
+		invalidJWK := &jose.JSONWebKey{
+			Key:       []byte("invalid-key"),
+			KeyID:     "invalid-key",
+			Algorithm: "invalid",
+			Use:       "sig",
+		}
+		_, err := ClientUnaryInterceptor(invalidJWK, nil, nil)
 		require.Error(t, err)
 
-		_, err = ClientStreamInterceptor(invalidKey, nil, nil)
+		_, err = ClientStreamInterceptor(invalidJWK, nil, nil)
 		require.Error(t, err)
 	})
 
 	t.Run("Token source error", func(t *testing.T) {
 		// Generate valid key
-		_, priv, err := ed25519.GenerateKey(nil)
+		pub, priv, err := ed25519.GenerateKey(nil)
 		require.NoError(t, err)
+		require.NotNil(t, pub)
+
+		jwk := &jose.JSONWebKey{
+			Key:       priv,
+			KeyID:     "test-key",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
 
 		// Create a failing token source
 		errorTokenSource := &mockTokenSource{
@@ -490,10 +526,10 @@ func TestClientInterceptorErrors(t *testing.T) {
 		}
 
 		// Create interceptors
-		unaryInterceptor, err := ClientUnaryInterceptor(priv, errorTokenSource, nil)
+		unaryInterceptor, err := ClientUnaryInterceptor(jwk, errorTokenSource, nil)
 		require.NoError(t, err)
 
-		streamInterceptor, err := ClientStreamInterceptor(priv, errorTokenSource, nil)
+		streamInterceptor, err := ClientStreamInterceptor(jwk, errorTokenSource, nil)
 		require.NoError(t, err)
 
 		// Create client with failing interceptors
@@ -522,8 +558,16 @@ func TestClientInterceptorErrors(t *testing.T) {
 
 	t.Run("Invalid target URL", func(t *testing.T) {
 		// Generate valid key
-		_, priv, err := ed25519.GenerateKey(nil)
+		pub, priv, err := ed25519.GenerateKey(nil)
 		require.NoError(t, err)
+		require.NotNil(t, pub)
+
+		jwk := &jose.JSONWebKey{
+			Key:       priv,
+			KeyID:     "test-key",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
 
 		tokenSource := &mockTokenSource{
 			token: &oauth2.Token{
@@ -534,10 +578,10 @@ func TestClientInterceptorErrors(t *testing.T) {
 		}
 
 		// Create interceptors
-		unaryInterceptor, err := ClientUnaryInterceptor(priv, tokenSource, nil)
+		unaryInterceptor, err := ClientUnaryInterceptor(jwk, tokenSource, nil)
 		require.NoError(t, err)
 
-		streamInterceptor, err := ClientStreamInterceptor(priv, tokenSource, nil)
+		streamInterceptor, err := ClientStreamInterceptor(jwk, tokenSource, nil)
 		require.NoError(t, err)
 
 		// Create client with invalid target

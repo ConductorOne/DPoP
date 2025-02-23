@@ -3,10 +3,10 @@ package dpop_grpc
 
 import (
 	"context"
-	"crypto"
 	"net/url"
 
 	"github.com/conductorone/dpop/pkg/dpop"
+	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -38,7 +38,7 @@ func getFullMethodURL(cc *grpc.ClientConn, method string) (string, error) {
 }
 
 // ClientUnaryInterceptor creates a new unary client interceptor with DPoP and OAuth2 support
-func ClientUnaryInterceptor(key crypto.PrivateKey, tokenSource oauth2.TokenSource, proofOpts []dpop.ProofOption) (grpc.UnaryClientInterceptor, error) {
+func ClientUnaryInterceptor(key *jose.JSONWebKey, tokenSource oauth2.TokenSource, proofOpts []dpop.ProofOption) (grpc.UnaryClientInterceptor, error) {
 	proofer, err := dpop.NewProofer(key)
 	if err != nil {
 		return nil, err
@@ -78,7 +78,7 @@ func ClientUnaryInterceptor(key crypto.PrivateKey, tokenSource oauth2.TokenSourc
 }
 
 // ClientStreamInterceptor creates a new stream client interceptor with DPoP and OAuth2 support
-func ClientStreamInterceptor(key crypto.PrivateKey, tokenSource oauth2.TokenSource, proofOpts []dpop.ProofOption) (grpc.StreamClientInterceptor, error) {
+func ClientStreamInterceptor(key *jose.JSONWebKey, tokenSource oauth2.TokenSource, proofOpts []dpop.ProofOption) (grpc.StreamClientInterceptor, error) {
 	proofer, err := dpop.NewProofer(key)
 	if err != nil {
 		return nil, err

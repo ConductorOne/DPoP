@@ -19,7 +19,7 @@ func TestJWTNonce(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create signing key with private key
-	signingKey := jose.JSONWebKey{
+	signingKey := &jose.JSONWebKey{
 		Key:       priv,
 		KeyID:     "test-key-1",
 		Algorithm: string(jose.EdDSA),
@@ -27,14 +27,14 @@ func TestJWTNonce(t *testing.T) {
 	}
 
 	// Create verification key with public key
-	verificationKey := jose.JSONWebKey{
+	verificationKey := &jose.JSONWebKey{
 		Key:       pub,
 		KeyID:     "test-key-1",
 		Algorithm: string(jose.EdDSA),
 		Use:       "sig",
 	}
 
-	nonce, err := NewJWTNonce(signingKey, verificationKey)
+	nonce, err := NewJWTNonce(*signingKey, *verificationKey)
 	require.NoError(t, err)
 
 	t.Run("implements interfaces", func(t *testing.T) {

@@ -2,10 +2,10 @@
 package dpop_http
 
 import (
-	"crypto"
 	"net/http"
 
 	"github.com/conductorone/dpop/pkg/dpop"
+	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 )
 
@@ -59,7 +59,7 @@ func (t *Transport) base() http.RoundTripper {
 }
 
 // NewTransport creates a new Transport with the given key and token getter
-func NewTransport(base http.RoundTripper, key crypto.PrivateKey, tokenSource oauth2.TokenSource, opts ...dpop.ProofOption) (*Transport, error) {
+func NewTransport(base http.RoundTripper, key *jose.JSONWebKey, tokenSource oauth2.TokenSource, opts ...dpop.ProofOption) (*Transport, error) {
 	proofer, err := dpop.NewProofer(key)
 	if err != nil {
 		return nil, err
