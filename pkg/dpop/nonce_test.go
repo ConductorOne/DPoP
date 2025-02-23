@@ -109,7 +109,7 @@ func TestJWTNonce(t *testing.T) {
 		require.NoError(t, err)
 
 		// Tamper with the nonce by changing the last character
-		tamperedNonce := n[:len(n)-1] + "X"
+		tamperedNonce := n[:len(n)-1] + "XYZ"
 		err = nonce.ValidateNonce(ctx, tamperedNonce)
 		assert.Error(t, err)
 	})

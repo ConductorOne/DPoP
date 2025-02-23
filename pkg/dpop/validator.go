@@ -144,6 +144,7 @@ func NewValidator(options ...Option) *Validator {
 		opts.allowedSignatureAlgorithms = []jose.SignatureAlgorithm{
 			jose.EdDSA,
 			jose.RS256,
+			jose.ES256,
 		}
 	}
 
