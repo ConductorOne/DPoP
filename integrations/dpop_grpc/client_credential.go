@@ -6,7 +6,6 @@ import (
 	"net/url"
 
 	"github.com/conductorone/dpop/pkg/dpop"
-	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc/credentials"
 )
@@ -23,16 +22,11 @@ type DPoPCredentials struct {
 
 // NewDPoPCredentials creates a new DPoPCredentials instance
 func NewDPoPCredentials(
-	key *jose.JSONWebKey,
+	proofer *dpop.Proofer,
 	tokenSource oauth2.TokenSource,
 	authority string,
 	proofOpts []dpop.ProofOption,
 ) (*DPoPCredentials, error) {
-	proofer, err := dpop.NewProofer(key)
-	if err != nil {
-		return nil, err
-	}
-
 	return &DPoPCredentials{
 		proofer:     proofer,
 		authority:   authority,

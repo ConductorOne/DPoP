@@ -161,9 +161,11 @@ func TestDPoPGRPC(t *testing.T) {
 			Expiry:      time.Now().Add(time.Hour),
 		},
 	}
+	proofer, err := dpop.NewProofer(jwk)
+	require.NoError(t, err)
 
 	// Create client credentials with DPoP
-	creds, err := NewDPoPCredentials(jwk, tokenSource, "test-endpoint", []dpop.ProofOption{
+	creds, err := NewDPoPCredentials(proofer, tokenSource, "test-endpoint", []dpop.ProofOption{
 		dpop.WithStaticNonce("test-nonce"),
 		dpop.WithValidityDuration(time.Minute * 5),
 		dpop.WithProofNowFunc(func() time.Time {
@@ -285,8 +287,11 @@ func TestDPoPGRPCErrors(t *testing.T) {
 			},
 		}
 
+		proofer, err := dpop.NewProofer(jwk)
+		require.NoError(t, err)
+
 		// Create credentials with an old timestamp
-		creds, err := NewDPoPCredentials(jwk, tokenSource, "test-endpoint", []dpop.ProofOption{
+		creds, err := NewDPoPCredentials(proofer, tokenSource, "test-endpoint", []dpop.ProofOption{
 			dpop.WithProofNowFunc(func() time.Time {
 				return time.Now().Add(-24 * time.Hour)
 			}),
