@@ -11,11 +11,13 @@ test:
 		pushd $$path > /dev/null && go test -v ./... && popd > /dev/null; \
 	done
 
+
+// make tag Tag=v0.0.1 ....
 .PHONY: tag
 tag:
-	@if [ -z "$(filter-out $@,$(MAKECMDGOALS))" ]; then \
-		echo "❌ ERROR: No tag supplied. Usage: make tag <version>"; \
+	@if [ -z "$(TAG)" ]; then \
+		echo "❌ ERROR: No tag supplied. Usage: make TAG=<version> tag"; \
 		exit 1; \
 	fi
-	@echo "Tagging all Go modules with $(filter-out $@,$(MAKECMDGOALS))..."
-	@go run tag.go $(filter-out $@,$(MAKECMDGOALS))
+	@echo "Tagging all Go modules with $(TAG)..."
+	@go run tag.go $(TAG)

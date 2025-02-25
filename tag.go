@@ -70,9 +70,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create Git tags
 	for _, gitTag := range moduleTags {
-		fmt.Printf("Tagging: %s\n", gitTag)
+		fmt.Printf("%s ", gitTag)
 		cmd := exec.Command("git", "tag", gitTag)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -80,6 +79,7 @@ func main() {
 			fmt.Printf("Failed to tag %s: %v\n", gitTag, err)
 		}
 	}
+	fmt.Printf("\n")
 }
 
 // parseModuleName extracts the module name from a go.mod file
