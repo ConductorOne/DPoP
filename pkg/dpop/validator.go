@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -63,6 +64,9 @@ type validationOptions struct {
 
 	// ExpectedPublicKey is the expected public key that should be used to sign the proof
 	expectedPublicKey *jose.JSONWebKey
+
+	// ConfirmationClaims contains the cnf claims from the access token
+	confirmationClaims map[string]string
 }
 
 // Option is a function that configures a validationOptions
@@ -121,6 +125,13 @@ func WithNowFunc(f func() time.Time) Option {
 func WithExpectedPublicKey(key *jose.JSONWebKey) Option {
 	return func(opts *validationOptions) {
 		opts.expectedPublicKey = key
+	}
+}
+
+// WithConfirmationClaims sets the confirmation claims from the access token
+func WithConfirmationClaims(cnf map[string]string) Option {
+	return func(opts *validationOptions) {
+		opts.confirmationClaims = cnf
 	}
 }
 
@@ -208,11 +219,31 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 		}
 	}
 
+	// If confirmation claims are provided and contain a jkt claim, validate the JWK thumbprint
+	if v.opts.confirmationClaims != nil {
+		if jkt, ok := v.opts.confirmationClaims["jkt"]; ok {
+			proofThumbprint, err := proofKey.Thumbprint(crypto.SHA256)
+			if err != nil {
+				return nil, fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidProof, err)
+			}
+			expectedThumbprint, err := base64.RawURLEncoding.DecodeString(jkt)
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims: %v", ErrInvalidProof, err)
+			}
+			if subtle.ConstantTimeCompare(proofThumbprint, expectedThumbprint) != 1 {
+				return nil, fmt.Errorf("%w: jkt mismatch in confirmation claims", ErrInvalidProof)
+			}
+		}
+	}
+
 	// Verify the claims
 	var claims Claims
 	if err := token.Claims(proofKey, &claims); err != nil {
 		return nil, fmt.Errorf("%w: failed to verify claims: %v", ErrInvalidProof, err)
 	}
+
+	// Store the public key in the claims
+	claims.publicKey = proofKey
 
 	// Validate the proof
 	if err := v.validateClaims(ctx, &claims, method, url); err != nil {

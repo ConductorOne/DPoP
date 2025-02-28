@@ -1,9 +1,12 @@
 package dpop
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -32,6 +35,14 @@ func TestValidateProof(t *testing.T) {
 		WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 	)
 
+	cmpKeys := func(a, b *jose.JSONWebKey) bool {
+		ah, err := a.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		bh, err := b.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		return bytes.Equal(ah, bh)
+	}
+
 	// Helper function to create a valid proof
 	createValidProof := func() string {
 		proof, err := proofer.CreateProof(
@@ -55,7 +66,21 @@ func TestValidateProof(t *testing.T) {
 			"https://resource.example.org/protected",
 		)
 		require.NoError(t, err)
-		assert.NotNil(t, claims)
+		require.NotNil(t, claims)
+		require.NotNil(t, claims.PublicKey())
+
+		// Verify the claims
+		require.Equal(t, "GET", claims.HTTPMethod)
+		require.Equal(t, "https://resource.example.org/protected", claims.HTTPUri)
+		require.NotEmpty(t, claims.Claims.ID)
+		require.NotNil(t, claims.Claims.IssuedAt)
+		require.NotNil(t, claims.Claims.NotBefore)
+		require.NotNil(t, claims.Claims.Expiry)
+
+		// Verify the public key
+		require.True(t, claims.PublicKey().IsPublic())
+		require.True(t, claims.PublicKey().Valid())
+		require.True(t, cmpKeys(jwk, claims.PublicKey()))
 	})
 
 	t.Run("invalid typ header", func(t *testing.T) {
@@ -234,6 +259,101 @@ func TestValidateProof(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "URI mismatch")
 	})
+
+	t.Run("with confirmation claims", func(t *testing.T) {
+		// Create a proofer with a key
+		proofer, err := NewProofer(jwk)
+		require.NoError(t, err)
+
+		// Create a proof
+		proof, err := proofer.CreateProof(
+			context.Background(),
+			"GET",
+			"https://resource.example.org/protected",
+		)
+		require.NoError(t, err)
+
+		// Get the thumbprint of the key
+		publicKey := proofer.key.Public()
+		thumbprint, err := publicKey.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+
+		// Create a validator with confirmation claims
+		validator := NewValidator(WithConfirmationClaims(map[string]string{
+			"jkt": base64.RawURLEncoding.EncodeToString(thumbprint),
+		}))
+
+		// Validate the proof
+		claims, err := validator.ValidateProof(
+			context.Background(),
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+		)
+		require.NoError(t, err)
+		require.NotNil(t, claims)
+		require.NotNil(t, claims.PublicKey())
+
+		// Verify the public key matches
+		resultThumbprint, err := claims.PublicKey().Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		assert.Equal(t, thumbprint, resultThumbprint)
+
+		// Test with invalid thumbprint
+		validator = NewValidator(WithConfirmationClaims(map[string]string{
+			"jkt": "invalid-thumbprint",
+		}))
+
+		// Should fail validation
+		_, err = validator.ValidateProof(
+			context.Background(),
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid jkt format in confirmation claims")
+
+		// Test with empty thumbprint
+		validator = NewValidator(WithConfirmationClaims(map[string]string{
+			"jkt": "",
+		}))
+
+		// Should fail validation
+		_, err = validator.ValidateProof(
+			context.Background(),
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid jkt format in confirmation claims")
+
+		// Test with mismatched thumbprint
+		newKey, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		newJwk := &jose.JSONWebKey{
+			Key:       newKey,
+			KeyID:     "test-key-2",
+			Algorithm: string(jose.EdDSA),
+			Use:       "sig",
+		}
+		newThumbprint, err := newJwk.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		validator = NewValidator(WithConfirmationClaims(map[string]string{
+			"jkt": base64.RawURLEncoding.EncodeToString(newThumbprint),
+		}))
+
+		// Should fail validation
+		_, err = validator.ValidateProof(
+			context.Background(),
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "jkt mismatch in confirmation claims")
+	})
 }
 
 func TestKeyBinding(t *testing.T) {
@@ -279,7 +399,7 @@ func TestKeyBinding(t *testing.T) {
 		}),
 	)
 
-	t.Run("proof with correct key binding", func(t *testing.T) {
+	t.Run("key binding", func(t *testing.T) {
 		// Create proof with key1
 		proof, err := proofer1.CreateProof(
 			context.Background(),
@@ -300,11 +420,10 @@ func TestKeyBinding(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NotNil(t, claims)
-	})
+		require.NotNil(t, claims.PublicKey())
 
-	t.Run("proof with wrong key binding", func(t *testing.T) {
 		// Create proof with key2
-		proof, err := proofer2.CreateProof(
+		proof, err = proofer2.CreateProof(
 			context.Background(),
 			"GET",
 			"https://resource.example.org/protected",
@@ -323,11 +442,9 @@ func TestKeyBinding(t *testing.T) {
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid key binding")
-	})
 
-	t.Run("proof with missing key binding", func(t *testing.T) {
 		// Create proof without access token binding
-		proof, err := proofer1.CreateProof(
+		proof, err = proofer1.CreateProof(
 			context.Background(),
 			"GET",
 			"https://resource.example.org/protected",
