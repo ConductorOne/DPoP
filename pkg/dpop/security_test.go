@@ -3,6 +3,7 @@ package dpop
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,12 @@ func TestSecurityScenarios(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
+			WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != "test-nonce-1" {
+					return fmt.Errorf("invalid nonce")
+				}
+				return nil
+			}),
 		)
 
 		// Create a valid proof
@@ -49,13 +56,25 @@ func TestSecurityScenarios(t *testing.T) {
 		require.NoError(t, err)
 
 		// First use should succeed
-		_, err = validator.ValidateProof(ctx, proof, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(
+			ctx,
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("access-token-123"),
+		)
 		require.NoError(t, err)
 
 		// Replay attempt should fail
-		_, err = validator.ValidateProof(ctx, proof, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(
+			ctx,
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("access-token-123"),
+		)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate jti for this nonce")
+		assert.Contains(t, err.Error(), "duplicate jti")
 	})
 
 	t.Run("token type confusion attack", func(t *testing.T) {

@@ -179,6 +179,99 @@ func TestCreateProof(t *testing.T) {
 		assert.True(t, claims.NotBefore.Time().Before(now))
 		assert.True(t, claims.Expiry.Time().After(now))
 	})
+
+	t.Run("proof without nbf and exp", func(t *testing.T) {
+		ctx := context.Background()
+		method := "GET"
+		url := "https://resource.example.com/protected"
+
+		proof, err := proofer.CreateProof(ctx, method, url,
+			WithNotBefore(false),
+			WithExpiry(false),
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, proof)
+
+		// Parse and verify the token
+		token, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.EdDSA})
+		require.NoError(t, err)
+
+		var claims Claims
+		err = token.Claims(pub, &claims)
+		require.NoError(t, err)
+
+		// Verify required claims are present
+		assert.NotEmpty(t, claims.ID)
+		assert.Equal(t, method, claims.HTTPMethod)
+		assert.Equal(t, url, claims.HTTPUri)
+		assert.NotNil(t, claims.IssuedAt)
+
+		// Verify optional claims are not present
+		assert.Nil(t, claims.NotBefore)
+		assert.Nil(t, claims.Expiry)
+	})
+
+	t.Run("proof with only nbf", func(t *testing.T) {
+		ctx := context.Background()
+		method := "GET"
+		url := "https://resource.example.com/protected"
+
+		proof, err := proofer.CreateProof(ctx, method, url,
+			WithNotBefore(true),
+			WithExpiry(false),
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, proof)
+
+		// Parse and verify the token
+		token, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.EdDSA})
+		require.NoError(t, err)
+
+		var claims Claims
+		err = token.Claims(pub, &claims)
+		require.NoError(t, err)
+
+		// Verify required claims are present
+		assert.NotEmpty(t, claims.ID)
+		assert.Equal(t, method, claims.HTTPMethod)
+		assert.Equal(t, url, claims.HTTPUri)
+		assert.NotNil(t, claims.IssuedAt)
+
+		// Verify optional claims
+		assert.NotNil(t, claims.NotBefore)
+		assert.Nil(t, claims.Expiry)
+	})
+
+	t.Run("proof with only exp", func(t *testing.T) {
+		ctx := context.Background()
+		method := "GET"
+		url := "https://resource.example.com/protected"
+
+		proof, err := proofer.CreateProof(ctx, method, url,
+			WithNotBefore(false),
+			WithExpiry(true),
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, proof)
+
+		// Parse and verify the token
+		token, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.EdDSA})
+		require.NoError(t, err)
+
+		var claims Claims
+		err = token.Claims(pub, &claims)
+		require.NoError(t, err)
+
+		// Verify required claims are present
+		assert.NotEmpty(t, claims.ID)
+		assert.Equal(t, method, claims.HTTPMethod)
+		assert.Equal(t, url, claims.HTTPUri)
+		assert.NotNil(t, claims.IssuedAt)
+
+		// Verify optional claims
+		assert.Nil(t, claims.NotBefore)
+		assert.NotNil(t, claims.Expiry)
+	})
 }
 
 // TestAccessTokenHash tests the access token hashing functionality

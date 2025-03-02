@@ -4,6 +4,7 @@ package dpop_gin
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/conductorone/dpop/pkg/dpop"
 	"github.com/gin-gonic/gin"
@@ -12,9 +13,18 @@ import (
 // ErrMissingDPoPHeader is returned when the DPoP header is missing from the request
 var ErrMissingDPoPHeader = errors.New("missing DPoP header")
 
+// ErrInvalidAuthScheme is returned when the Authorization header has an invalid scheme
+var ErrInvalidAuthScheme = errors.New("invalid authorization scheme")
+
 const (
 	// DPoPClaimsKey is the key used to store DPoP claims in the Gin context
 	DPoPClaimsKey = "dpop-claims"
+	// AuthorizationHeader is the standard HTTP header for authorization
+	AuthorizationHeader = "Authorization"
+	// DPoPScheme is the scheme used for DPoP bound tokens
+	DPoPScheme = "DPoP"
+	// BearerScheme is the scheme used for Bearer tokens
+	BearerScheme = "Bearer"
 )
 
 // serverOptions configures the behavior of the DPoP middleware
@@ -88,16 +98,51 @@ func Middleware(opts ...ServerOption) gin.HandlerFunc {
 			c.Header(dpop.NonceHeaderName, nonce)
 		}
 
-		// Get the DPoP proof from the header
+		// Get the DPoP proof and Authorization header
 		dpopProof := c.GetHeader(dpop.HeaderName)
+		authHeader := c.GetHeader(AuthorizationHeader)
+
+		// Parse Authorization header if present
+		var authScheme, accessToken string
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 {
+				options.errorHandler(c, ErrInvalidAuthScheme)
+				c.Abort()
+				return
+			}
+			authScheme = parts[0]
+			accessToken = parts[1]
+		}
+
+		// If there's no DPoP proof and no DPoP Authorization header, proceed with the request
+		// This allows the middleware to be used in chains where some endpoints don't require DPoP
+		if dpopProof == "" && authScheme != DPoPScheme {
+			c.Next()
+			return
+		}
+
+		// Here, we know this request must be DPoP validated, so make sure we have a proof.
 		if dpopProof == "" {
 			options.errorHandler(c, ErrMissingDPoPHeader)
 			c.Abort()
 			return
 		}
 
-		// Validate the proof
-		claims, err := validator.ValidateProof(c.Request.Context(), dpopProof, c.Request.Method, getRequestURL(c.Request))
+		// If we have an Authorization header, it must be DPoP
+		if len(authHeader) > 0 && authScheme != DPoPScheme {
+			options.errorHandler(c, ErrInvalidAuthScheme)
+			c.Abort()
+			return
+		}
+
+		var validationOpts []dpop.ValidationProofOption
+		if authScheme == DPoPScheme {
+			// If using DPoP scheme, the proof MUST be bound to the access token
+			validationOpts = append(validationOpts, dpop.WithProofExpectedAccessToken(accessToken))
+		}
+
+		claims, err := validator.ValidateProof(c.Request.Context(), dpopProof, c.Request.Method, getRequestURL(c.Request), validationOpts...)
 		if err != nil {
 			options.errorHandler(c, err)
 			c.Abort()
@@ -125,12 +170,16 @@ func defaultErrorHandler(c *gin.Context, err error) {
 	switch {
 	case err == ErrMissingDPoPHeader:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "DPoP header required"})
+	case err == ErrInvalidAuthScheme:
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization scheme"})
 	case err == dpop.ErrInvalidProof:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid DPoP proof"})
 	case err == dpop.ErrExpiredProof:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Expired DPoP proof"})
 	case err == dpop.ErrInvalidNonce:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid DPoP nonce"})
+	case err == dpop.ErrInvalidTokenBinding:
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid DPoP token binding"})
 	default:
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "DPoP validation failed"})
 	}

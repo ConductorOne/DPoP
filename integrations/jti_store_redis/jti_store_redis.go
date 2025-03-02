@@ -78,13 +78,13 @@ func hashKey(input string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// CheckAndStoreJTI validates and stores a JTI with a nonce
-func (s *JTIStore) CheckAndStoreJTI(ctx context.Context, jti string, nonce string) error {
-	// Create a single composite key from both values
-	compositeKey := fmt.Sprintf("dpop:jti:%s:%s", hashKey(nonce), hashKey(jti))
+// CheckAndStoreJTI validates and stores a JTI
+func (s *JTIStore) CheckAndStoreJTI(ctx context.Context, jti string) error {
+	// Create a key from the JTI
+	key := fmt.Sprintf("dpop:jti:%s", hashKey(jti))
 
 	// Try to SET with NX (only if not exists) and a TTL
-	ok, err := s.client.SetNX(ctx, compositeKey, "1", s.ttl).Result()
+	ok, err := s.client.SetNX(ctx, key, "1", s.ttl).Result()
 	if err != nil {
 		return fmt.Errorf("redis error: %w", err)
 	}
@@ -92,7 +92,6 @@ func (s *JTIStore) CheckAndStoreJTI(ctx context.Context, jti string, nonce strin
 	if !ok {
 		s.logger.Warn("jti reuse attempt detected",
 			zap.String("jti", jti),
-			zap.String("nonce", nonce),
 		)
 		return ErrJTIAlreadyUsed
 	}

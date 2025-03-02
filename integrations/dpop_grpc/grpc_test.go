@@ -225,6 +225,57 @@ func TestDPoPGRPC(t *testing.T) {
 		err = stream.CloseSend()
 		require.NoError(t, err)
 	})
+
+	t.Run("Unary call with valid DPoP token in Authorization header", func(t *testing.T) {
+		// Create a new client with a token source that returns a DPoP token
+		tokenSource := &mockTokenSource{
+			token: &oauth2.Token{
+				AccessToken: "test-access-token-with-auth-header",
+				TokenType:   "DPoP",
+				Expiry:      time.Now().Add(time.Hour),
+			},
+		}
+
+		// Create a new proofer with the same key
+		proofer, err := dpop.NewProofer(jwk)
+		require.NoError(t, err)
+
+		// Create client credentials with DPoP and explicit token binding
+		creds, err := NewDPoPCredentials(proofer, tokenSource, "test-endpoint", []dpop.ProofOption{
+			dpop.WithStaticNonce("test-nonce"),
+			dpop.WithValidityDuration(time.Minute * 5),
+			dpop.WithProofNowFunc(func() time.Time {
+				return time.Now() // Use current time to avoid clock skew issues
+			}),
+			// Add token binding to the proof
+			dpop.WithAccessToken("test-access-token-with-auth-header"),
+		})
+		require.NoError(t, err)
+		creds.requireTLS = false
+
+		// Create a new connection with the credentials
+		conn2, err := grpc.NewClient(
+			"bufnet://test-endpoint",
+			grpc.WithContextDialer(dialer),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithPerRPCCredentials(creds),
+		)
+		require.NoError(t, err)
+		defer conn2.Close()
+
+		client2 := pb.NewTestServiceClient(conn2)
+
+		// Make the call
+		resp, err := client2.TestUnary(context.Background(), &pb.TestRequest{
+			Message: "test message with auth header",
+		})
+		require.NoError(t, err)
+		assert.Contains(t, resp.Message, "test message with auth header")
+		assert.NotEmpty(t, resp.DpopJti)
+		assert.Equal(t, "POST", resp.DpopHtm)
+		assert.Equal(t, "https://test-endpoint/test.TestService/TestUnary", resp.DpopHtu)
+		assert.Equal(t, "test-nonce", resp.DpopNonce)
+	})
 }
 
 func TestDPoPGRPCErrors(t *testing.T) {
@@ -264,7 +315,10 @@ func TestDPoPGRPCErrors(t *testing.T) {
 		require.Error(t, err)
 		st, ok := status.FromError(err)
 		require.True(t, ok)
-		assert.Equal(t, codes.Unauthenticated, st.Code())
+		// We expect the middleware to allow the request to pass through
+		// We'll then fail it in our real handler because we don't have DPoP claims
+		assert.Equal(t, codes.Internal, st.Code())
+		require.Equal(t, "DPoP claims not found in context", st.Message())
 	})
 
 	t.Run("Call with expired DPoP proof", func(t *testing.T) {
@@ -316,6 +370,96 @@ func TestDPoPGRPCErrors(t *testing.T) {
 		st, ok := status.FromError(err)
 		require.True(t, ok)
 		assert.Equal(t, codes.Unauthenticated, st.Code())
+	})
+
+	t.Run("Call with invalid Authorization scheme", func(t *testing.T) {
+		// Create a client connection with Bearer token instead of DPoP
+		conn, err := grpc.NewClient(
+			"bufnet://test-endpoint",
+			grpc.WithContextDialer(dialer),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Create context with Bearer token in metadata
+		ctx := metadata.NewOutgoingContext(
+			context.Background(),
+			metadata.Pairs(
+				dpop.HeaderName, "valid-dpop-proof", // Add a DPoP proof to trigger validation
+				AuthorizationHeader, "Bearer invalid-token", // Use Bearer scheme instead of DPoP
+			),
+		)
+
+		client := pb.NewTestServiceClient(conn)
+		_, err = client.TestUnary(ctx, &pb.TestRequest{
+			Message: "test message",
+		})
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+		assert.Contains(t, st.Message(), "invalid authorization scheme")
+	})
+
+	t.Run("Call with DPoP Authorization but missing DPoP proof", func(t *testing.T) {
+		// Create a client connection
+		conn, err := grpc.NewClient(
+			"bufnet://test-endpoint",
+			grpc.WithContextDialer(dialer),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Create context with DPoP token in metadata but no proof
+		ctx := metadata.NewOutgoingContext(
+			context.Background(),
+			metadata.Pairs(
+				AuthorizationHeader, "DPoP valid-token", // Use DPoP scheme
+				// Intentionally omit the DPoP proof header
+			),
+		)
+
+		client := pb.NewTestServiceClient(conn)
+		_, err = client.TestUnary(ctx, &pb.TestRequest{
+			Message: "test message",
+		})
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+		assert.Contains(t, st.Message(), "missing DPoP header")
+	})
+
+	t.Run("Call with malformed Authorization header", func(t *testing.T) {
+		// Create a client connection
+		conn, err := grpc.NewClient(
+			"bufnet://test-endpoint",
+			grpc.WithContextDialer(dialer),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Create context with malformed Authorization header
+		ctx := metadata.NewOutgoingContext(
+			context.Background(),
+			metadata.Pairs(
+				dpop.HeaderName, "valid-dpop-proof", // Add a DPoP proof to trigger validation
+				AuthorizationHeader, "MalformedHeader", // Missing the token part
+			),
+		)
+
+		client := pb.NewTestServiceClient(conn)
+		_, err = client.TestUnary(ctx, &pb.TestRequest{
+			Message: "test message",
+		})
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+		assert.Contains(t, st.Message(), "invalid authorization scheme")
 	})
 }
 

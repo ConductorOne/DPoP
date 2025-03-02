@@ -1,6 +1,6 @@
 # submodules with go.mod files
 GO_SUB_MODULES = integrations/dpop_oauth2 integrations/dpop_http integrations/dpop_grpc integrations/jti_store_redis integrations/dpop_gin
-GO_MODULES_PATHS = . + $(GO_SUB_MODULES)
+GO_MODULES_PATHS = . $(GO_SUB_MODULES)
 
 update-deps:
 	for path in $(GO_MODULES_PATHS); do \

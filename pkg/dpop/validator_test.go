@@ -7,11 +7,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,6 +35,12 @@ func TestValidateProof(t *testing.T) {
 
 	validator := NewValidator(
 		WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
+		WithNonceValidator(func(ctx context.Context, nonce string) error {
+			if nonce != "test-nonce-123" {
+				return fmt.Errorf("invalid nonce")
+			}
+			return nil
+		}),
 	)
 
 	cmpKeys := func(a, b *jose.JSONWebKey) bool {
@@ -64,6 +72,7 @@ func TestValidateProof(t *testing.T) {
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, claims)
@@ -74,13 +83,128 @@ func TestValidateProof(t *testing.T) {
 		require.Equal(t, "https://resource.example.org/protected", claims.HTTPUri)
 		require.NotEmpty(t, claims.Claims.ID)
 		require.NotNil(t, claims.Claims.IssuedAt)
-		require.NotNil(t, claims.Claims.NotBefore)
-		require.NotNil(t, claims.Claims.Expiry)
+		// nbf and exp are optional, so we don't require them here
 
 		// Verify the public key
 		require.True(t, claims.PublicKey().IsPublic())
 		require.True(t, claims.PublicKey().Valid())
 		require.True(t, cmpKeys(jwk, claims.PublicKey()))
+	})
+
+	t.Run("valid proof without nbf and exp", func(t *testing.T) {
+		// Create a JWT with only required claims
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
+			ExtraHeaders: map[jose.HeaderKey]interface{}{
+				"typ": DPoPHeaderTyp,
+				"jwk": jwk.Public(),
+			},
+		})
+		require.NoError(t, err)
+
+		claims := &Claims{
+			Claims: &jwt.Claims{
+				ID:       uuid.New().String(),
+				IssuedAt: jwt.NewNumericDate(time.Now()),
+			},
+			HTTPMethod: "GET",
+			HTTPUri:    "https://resource.example.org/protected",
+			Nonce:      "test-nonce-123",
+			TokenHash:  hashAccessToken("test-token-123"),
+		}
+
+		token, err := jwt.Signed(signer).Claims(claims).Serialize()
+		require.NoError(t, err)
+
+		// Validation should succeed
+		validatedClaims, err := validator.ValidateProof(
+			context.Background(),
+			token,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, validatedClaims)
+		require.Nil(t, validatedClaims.Claims.NotBefore)
+		require.Nil(t, validatedClaims.Claims.Expiry)
+	})
+
+	t.Run("valid proof with only nbf", func(t *testing.T) {
+		// Create a JWT with nbf but no exp
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
+			ExtraHeaders: map[jose.HeaderKey]interface{}{
+				"typ": DPoPHeaderTyp,
+				"jwk": jwk.Public(),
+			},
+		})
+		require.NoError(t, err)
+
+		claims := &Claims{
+			Claims: &jwt.Claims{
+				ID:        uuid.New().String(),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+				NotBefore: jwt.NewNumericDate(time.Now().Add(-30 * time.Second)),
+			},
+			HTTPMethod: "GET",
+			HTTPUri:    "https://resource.example.org/protected",
+			Nonce:      "test-nonce-123",
+			TokenHash:  hashAccessToken("test-token-123"),
+		}
+
+		token, err := jwt.Signed(signer).Claims(claims).Serialize()
+		require.NoError(t, err)
+
+		// Validation should succeed
+		validatedClaims, err := validator.ValidateProof(
+			context.Background(),
+			token,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, validatedClaims)
+		require.NotNil(t, validatedClaims.Claims.NotBefore)
+		require.Nil(t, validatedClaims.Claims.Expiry)
+	})
+
+	t.Run("valid proof with only exp", func(t *testing.T) {
+		// Create a JWT with exp but no nbf
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, &jose.SignerOptions{
+			ExtraHeaders: map[jose.HeaderKey]interface{}{
+				"typ": DPoPHeaderTyp,
+				"jwk": jwk.Public(),
+			},
+		})
+		require.NoError(t, err)
+
+		claims := &Claims{
+			Claims: &jwt.Claims{
+				ID:       uuid.New().String(),
+				IssuedAt: jwt.NewNumericDate(time.Now()),
+				Expiry:   jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
+			},
+			HTTPMethod: "GET",
+			HTTPUri:    "https://resource.example.org/protected",
+			Nonce:      "test-nonce-123",
+			TokenHash:  hashAccessToken("test-token-123"),
+		}
+
+		token, err := jwt.Signed(signer).Claims(claims).Serialize()
+		require.NoError(t, err)
+
+		// Validation should succeed
+		validatedClaims, err := validator.ValidateProof(
+			context.Background(),
+			token,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, validatedClaims)
+		require.Nil(t, validatedClaims.Claims.NotBefore)
+		require.NotNil(t, validatedClaims.Claims.Expiry)
 	})
 
 	t.Run("invalid typ header", func(t *testing.T) {
@@ -95,13 +219,15 @@ func TestValidateProof(t *testing.T) {
 
 		claims := &Claims{
 			Claims: &jwt.Claims{
-				ID:        "test-id",
+				ID:        uuid.New().String(),
 				IssuedAt:  jwt.NewNumericDate(time.Now()),
 				NotBefore: jwt.NewNumericDate(time.Now().Add(-30 * time.Second)),
 				Expiry:    jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
 			},
 			HTTPMethod: "GET",
 			HTTPUri:    "https://resource.example.org/protected",
+			Nonce:      "test-nonce-123",
+			TokenHash:  hashAccessToken("test-token-123"),
 		}
 
 		token, err := jwt.Signed(signer).Claims(claims).Serialize()
@@ -112,6 +238,7 @@ func TestValidateProof(t *testing.T) {
 			token,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid token type")
@@ -132,13 +259,15 @@ func TestValidateProof(t *testing.T) {
 
 		claims := &Claims{
 			Claims: &jwt.Claims{
-				ID:        "test-id",
+				ID:        uuid.New().String(),
 				IssuedAt:  jwt.NewNumericDate(time.Now()),
 				NotBefore: jwt.NewNumericDate(time.Now().Add(-30 * time.Second)),
 				Expiry:    jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
 			},
 			HTTPMethod: "GET",
 			HTTPUri:    "https://resource.example.org/protected",
+			Nonce:      "test-nonce-123",
+			TokenHash:  hashAccessToken("test-token-123"),
 		}
 
 		token, err := jwt.Signed(signer).Claims(claims).Serialize()
@@ -150,6 +279,7 @@ func TestValidateProof(t *testing.T) {
 			token,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "no embedded JWK")
@@ -198,7 +328,7 @@ func TestValidateProof(t *testing.T) {
 		require.NoError(t, err)
 
 		// Validation should fail
-		_, err = validator.ValidateProof(context.Background(), modifiedToken, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(context.Background(), modifiedToken, "GET", "https://resource.example.org/protected", WithProofExpectedAccessToken("test-token-123"))
 		assert.Error(t, err)
 
 		// Test expired token
@@ -210,7 +340,7 @@ func TestValidateProof(t *testing.T) {
 		require.NoError(t, err)
 
 		// Validation should fail
-		_, err = validator.ValidateProof(context.Background(), modifiedToken, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(context.Background(), modifiedToken, "GET", "https://resource.example.org/protected", WithProofExpectedAccessToken("test-token-123"))
 		assert.Error(t, err)
 	})
 
@@ -226,11 +356,18 @@ func TestValidateProof(t *testing.T) {
 			"GET",
 			"https://resource.example.org/protected",
 			WithValidityDuration(5*time.Minute),
+			WithAccessToken("test-token-123"),
 		)
 		require.NoError(t, err)
 
 		// Validation should fail
-		_, err = validator.ValidateProof(context.Background(), proof, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(
+			context.Background(),
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token-123"),
+		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "nonce required but not provided")
 	})
@@ -250,12 +387,12 @@ func TestValidateProof(t *testing.T) {
 		require.NoError(t, err)
 
 		// Try to use with different method
-		_, err = validator.ValidateProof(context.Background(), proof, "POST", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(context.Background(), proof, "POST", "https://resource.example.org/protected", WithProofExpectedAccessToken("test-token-123"))
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "method mismatch")
 
 		// Try to use with different URI
-		_, err = validator.ValidateProof(context.Background(), proof, "GET", "https://attacker.example.org/protected")
+		_, err = validator.ValidateProof(context.Background(), proof, "GET", "https://attacker.example.org/protected", WithProofExpectedAccessToken("test-token-123"))
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "URI mismatch")
 	})
@@ -279,9 +416,7 @@ func TestValidateProof(t *testing.T) {
 		require.NoError(t, err)
 
 		// Create a validator with confirmation claims
-		validator := NewValidator(WithConfirmationClaims(map[string]string{
-			"jkt": base64.RawURLEncoding.EncodeToString(thumbprint),
-		}))
+		validator := NewValidator()
 
 		// Validate the proof
 		claims, err := validator.ValidateProof(
@@ -289,6 +424,9 @@ func TestValidateProof(t *testing.T) {
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofConfirmationClaims(map[string]string{
+				"jkt": base64.RawURLEncoding.EncodeToString(thumbprint),
+			}),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, claims)
@@ -300,31 +438,27 @@ func TestValidateProof(t *testing.T) {
 		assert.Equal(t, thumbprint, resultThumbprint)
 
 		// Test with invalid thumbprint
-		validator = NewValidator(WithConfirmationClaims(map[string]string{
-			"jkt": "invalid-thumbprint",
-		}))
-
-		// Should fail validation
 		_, err = validator.ValidateProof(
 			context.Background(),
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofConfirmationClaims(map[string]string{
+				"jkt": "invalid-thumbprint",
+			}),
 		)
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "invalid jkt format in confirmation claims")
+		require.Contains(t, err.Error(), "jkt mismatch in confirmation claim")
 
 		// Test with empty thumbprint
-		validator = NewValidator(WithConfirmationClaims(map[string]string{
-			"jkt": "",
-		}))
-
-		// Should fail validation
 		_, err = validator.ValidateProof(
 			context.Background(),
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofConfirmationClaims(map[string]string{
+				"jkt": "",
+			}),
 		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid jkt format in confirmation claims")
@@ -340,16 +474,15 @@ func TestValidateProof(t *testing.T) {
 		}
 		newThumbprint, err := newJwk.Thumbprint(crypto.SHA256)
 		require.NoError(t, err)
-		validator = NewValidator(WithConfirmationClaims(map[string]string{
-			"jkt": base64.RawURLEncoding.EncodeToString(newThumbprint),
-		}))
 
-		// Should fail validation
 		_, err = validator.ValidateProof(
 			context.Background(),
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofConfirmationClaims(map[string]string{
+				"jkt": base64.RawURLEncoding.EncodeToString(newThumbprint),
+			}),
 		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "jkt mismatch in confirmation claims")
@@ -389,15 +522,20 @@ func TestKeyBinding(t *testing.T) {
 	// Create validator that expects key1's public key
 	validator := NewValidator(
 		WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
-		WithRequireAccessTokenBinding(true),
-		WithExpectedAccessToken("test-token"),
-		WithExpectedPublicKey(&jose.JSONWebKey{
-			Key:       pub1,
-			KeyID:     "test-key-1",
-			Algorithm: string(jose.EdDSA),
-			Use:       "sig",
+		WithNonceValidator(func(ctx context.Context, nonce string) error {
+			if nonce != "test-nonce-123" {
+				return fmt.Errorf("invalid nonce")
+			}
+			return nil
 		}),
 	)
+
+	pubKey := &jose.JSONWebKey{
+		Key:       pub1,
+		KeyID:     "test-key-1",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
 
 	t.Run("key binding", func(t *testing.T) {
 		// Create proof with key1
@@ -417,6 +555,8 @@ func TestKeyBinding(t *testing.T) {
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token"),
+			WithProofExpectedPublicKey(pubKey),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, claims)
@@ -439,6 +579,8 @@ func TestKeyBinding(t *testing.T) {
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token"),
+			WithProofExpectedPublicKey(pubKey),
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid key binding")
@@ -459,6 +601,8 @@ func TestKeyBinding(t *testing.T) {
 			proof,
 			"GET",
 			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("test-token"),
+			WithProofExpectedPublicKey(pubKey),
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "missing token hash")

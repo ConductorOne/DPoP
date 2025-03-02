@@ -48,6 +48,8 @@ type proofOptions struct {
 	accessToken      string
 	additionalClaims map[string]interface{}
 	now              func() time.Time
+	includeNotBefore bool
+	includeExpiry    bool
 }
 
 // WithValidityDuration sets the duration for which the proof is valid
@@ -93,11 +95,27 @@ func WithProofNowFunc(f func() time.Time) ProofOption {
 	}
 }
 
+// WithNotBefore sets whether to include the nbf claim in the proof
+func WithNotBefore(include bool) ProofOption {
+	return func(o *proofOptions) {
+		o.includeNotBefore = include
+	}
+}
+
+// WithExpiry sets whether to include the exp claim in the proof
+func WithExpiry(include bool) ProofOption {
+	return func(o *proofOptions) {
+		o.includeExpiry = include
+	}
+}
+
 // defaultOptions returns the default options for proof generation
 func defaultOptions() *proofOptions {
 	return &proofOptions{
 		validityDuration: DefaultProofValidityDuration,
 		now:              time.Now,
+		includeNotBefore: true, // For backward compatibility
+		includeExpiry:    true, // For backward compatibility
 	}
 }
 
@@ -176,13 +194,19 @@ func (p *Proofer) CreateProof(ctx context.Context, method string, url string, op
 
 	claims := Claims{
 		Claims: &jwt.Claims{
-			ID:        jti.String(),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now.Add(-30 * time.Second)),
-			Expiry:    jwt.NewNumericDate(now.Add(options.validityDuration)),
+			ID:       jti.String(),
+			IssuedAt: jwt.NewNumericDate(now),
 		},
 		HTTPMethod: method,
 		HTTPUri:    url,
+	}
+
+	if options.includeNotBefore {
+		claims.Claims.NotBefore = jwt.NewNumericDate(now.Add(-30 * time.Second))
+	}
+
+	if options.includeExpiry {
+		claims.Claims.Expiry = jwt.NewNumericDate(now.Add(options.validityDuration))
 	}
 
 	// Get nonce if function is provided
@@ -220,8 +244,12 @@ func (p *Proofer) CreateProof(ctx context.Context, method string, url string, op
 	// Add the standard claims
 	finalClaims["jti"] = claims.ID
 	finalClaims["iat"] = claims.IssuedAt
-	finalClaims["nbf"] = claims.NotBefore
-	finalClaims["exp"] = claims.Expiry
+	if claims.Claims.NotBefore != nil {
+		finalClaims["nbf"] = claims.NotBefore
+	}
+	if claims.Claims.Expiry != nil {
+		finalClaims["exp"] = claims.Expiry
+	}
 	finalClaims["htm"] = claims.HTTPMethod
 	finalClaims["htu"] = claims.HTTPUri
 	if claims.Nonce != "" {

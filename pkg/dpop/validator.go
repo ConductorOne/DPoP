@@ -39,19 +39,49 @@ type NonceGenerator func(ctx context.Context) (string, error)
 // NonceValidator is a function that validates server-provided nonces for DPoP proofs
 type NonceValidator func(ctx context.Context, nonce string) error
 
-// ValidationOptions configures the behavior of proof validation
+// ValidationProofOptions configures the behavior of a specific proof validation
+type ValidationProofOptions struct {
+	// ExpectedAccessToken is the expected access token bound to the proof
+	expectedAccessToken string
+
+	// ExpectedPublicKey is the expected public key that should be used to sign the proof
+	expectedPublicKey *jose.JSONWebKey
+
+	// ConfirmationClaims contains the cnf claims from the access token
+	confirmationClaims map[string]string
+}
+
+// ValidationProofOption is a function that configures a ValidationProofOptions
+type ValidationProofOption func(*ValidationProofOptions)
+
+// WithProofExpectedAccessToken sets the expected access token for a specific proof validation
+func WithProofExpectedAccessToken(token string) ValidationProofOption {
+	return func(opts *ValidationProofOptions) {
+		opts.expectedAccessToken = token
+	}
+}
+
+// WithProofExpectedPublicKey sets the expected public key that should be used to sign the proof
+func WithProofExpectedPublicKey(key *jose.JSONWebKey) ValidationProofOption {
+	return func(opts *ValidationProofOptions) {
+		opts.expectedPublicKey = key
+	}
+}
+
+// WithProofConfirmationClaims sets the confirmation claims from the access token
+func WithProofConfirmationClaims(cnf map[string]string) ValidationProofOption {
+	return func(opts *ValidationProofOptions) {
+		opts.confirmationClaims = cnf
+	}
+}
+
+// validationOptions configures the behavior of proof validation
 type validationOptions struct {
 	// MaxClockSkew is the maximum allowed clock skew for proof validation
 	maxClockSkew time.Duration
 
 	// NonceValidator is used to validate server-provided nonces
 	nonceValidator NonceValidator
-
-	// ExpectedAccessToken is the expected access token bound to the proof
-	expectedAccessToken string
-
-	// RequireAccessTokenBinding indicates whether access token binding is required
-	requireAccessTokenBinding bool
 
 	// AllowedSignatureAlgorithms specifies which signature algorithms are accepted
 	allowedSignatureAlgorithms []jose.SignatureAlgorithm
@@ -61,12 +91,6 @@ type validationOptions struct {
 
 	// Now returns the current time for proof validation
 	now func() time.Time
-
-	// ExpectedPublicKey is the expected public key that should be used to sign the proof
-	expectedPublicKey *jose.JSONWebKey
-
-	// ConfirmationClaims contains the cnf claims from the access token
-	confirmationClaims map[string]string
 }
 
 // Option is a function that configures a validationOptions
@@ -83,20 +107,6 @@ func WithMaxClockSkew(d time.Duration) Option {
 func WithNonceValidator(v NonceValidator) Option {
 	return func(opts *validationOptions) {
 		opts.nonceValidator = v
-	}
-}
-
-// WithExpectedAccessToken sets the expected access token
-func WithExpectedAccessToken(token string) Option {
-	return func(opts *validationOptions) {
-		opts.expectedAccessToken = token
-	}
-}
-
-// WithRequireAccessTokenBinding sets whether access token binding is required
-func WithRequireAccessTokenBinding(required bool) Option {
-	return func(opts *validationOptions) {
-		opts.requireAccessTokenBinding = required
 	}
 }
 
@@ -118,20 +128,6 @@ func WithJTIStore(store CheckAndStoreJTI) Option {
 func WithNowFunc(f func() time.Time) Option {
 	return func(opts *validationOptions) {
 		opts.now = f
-	}
-}
-
-// WithExpectedPublicKey sets the expected public key that should be used to sign the proof
-func WithExpectedPublicKey(key *jose.JSONWebKey) Option {
-	return func(opts *validationOptions) {
-		opts.expectedPublicKey = key
-	}
-}
-
-// WithConfirmationClaims sets the confirmation claims from the access token
-func WithConfirmationClaims(cnf map[string]string) Option {
-	return func(opts *validationOptions) {
-		opts.confirmationClaims = cnf
 	}
 }
 
@@ -175,7 +171,13 @@ func NewValidator(options ...Option) *Validator {
 }
 
 // ValidateProof validates a DPoP proof for the given HTTP method and URL
-func (v *Validator) ValidateProof(ctx context.Context, proof string, method string, url string) (*Claims, error) {
+func (v *Validator) ValidateProof(ctx context.Context, proof string, method string, url string, options ...ValidationProofOption) (*Claims, error) {
+	// Initialize validation proof options
+	proofOpts := &ValidationProofOptions{}
+	for _, option := range options {
+		option(proofOpts)
+	}
+
 	token, err := jwt.ParseSigned(proof, v.opts.allowedSignatureAlgorithms)
 	if err != nil {
 		return nil, fmt.Errorf("%w: failed to parse token: %v", ErrInvalidProof, err)
@@ -205,8 +207,8 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 		return nil, fmt.Errorf("%w: invalid JWK", ErrInvalidProof)
 	}
 
-	if v.opts.expectedPublicKey != nil {
-		expectedThumbprint, err := v.opts.expectedPublicKey.Thumbprint(crypto.SHA256)
+	if proofOpts.expectedPublicKey != nil {
+		expectedThumbprint, err := proofOpts.expectedPublicKey.Thumbprint(crypto.SHA256)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to generate expected thumbprint: %v", ErrInvalidProof, err)
 		}
@@ -220,19 +222,21 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 	}
 
 	// If confirmation claims are provided and contain a jkt claim, validate the JWK thumbprint
-	if v.opts.confirmationClaims != nil {
-		if jkt, ok := v.opts.confirmationClaims["jkt"]; ok {
-			proofThumbprint, err := proofKey.Thumbprint(crypto.SHA256)
-			if err != nil {
-				return nil, fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidProof, err)
-			}
-			expectedThumbprint, err := base64.RawURLEncoding.DecodeString(jkt)
-			if err != nil {
-				return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims: %v", ErrInvalidProof, err)
-			}
-			if subtle.ConstantTimeCompare(proofThumbprint, expectedThumbprint) != 1 {
-				return nil, fmt.Errorf("%w: jkt mismatch in confirmation claims", ErrInvalidProof)
-			}
+	if proofOpts.confirmationClaims != nil {
+		jkt := proofOpts.confirmationClaims["jkt"]
+		if jkt == "" {
+			return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims", ErrInvalidProof)
+		}
+		proofThumbprint, err := proofKey.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidProof, err)
+		}
+		expectedThumbprint, err := base64.RawURLEncoding.DecodeString(jkt)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims: %v", ErrInvalidProof, err)
+		}
+		if subtle.ConstantTimeCompare(proofThumbprint, expectedThumbprint) != 1 {
+			return nil, fmt.Errorf("%w: jkt mismatch in confirmation claims", ErrInvalidProof)
 		}
 	}
 
@@ -246,7 +250,7 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 	claims.publicKey = proofKey
 
 	// Validate the proof
-	if err := v.validateClaims(ctx, &claims, method, url); err != nil {
+	if err := v.validateClaims(ctx, &claims, method, url, proofOpts); err != nil {
 		return nil, err
 	}
 
@@ -254,38 +258,35 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 }
 
 // validateClaims validates the claims in a DPoP proof
-func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, url string) error {
+func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, url string, proofOpts *ValidationProofOptions) error {
 	now := v.opts.now()
 
 	// Check required claims
 	if claims.Claims.ID == "" {
 		return fmt.Errorf("%w: missing required claim: jti", ErrInvalidProof)
 	}
-
 	if claims.Claims.IssuedAt == nil {
 		return fmt.Errorf("%w: missing required claim: iat", ErrInvalidProof)
 	}
 
-	if claims.Claims.NotBefore == nil {
-		return fmt.Errorf("%w: missing required claim: nbf", ErrInvalidProof)
+	// Check that iat is ~now() (with skew leeway)
+	iatTime := claims.Claims.IssuedAt.Time()
+	if now.Add(-v.opts.maxClockSkew).After(iatTime) || now.Add(v.opts.maxClockSkew).Before(iatTime) {
+		return fmt.Errorf("%w: issued at time is not within acceptable range of current time", ErrInvalidProof)
 	}
 
-	if claims.Claims.Expiry == nil {
-		return fmt.Errorf("%w: missing required claim: exp", ErrInvalidProof)
+	// nbf is optional, but if present, validate it
+	if claims.Claims.NotBefore != nil {
+		if now.Add(v.opts.maxClockSkew).Before(claims.Claims.NotBefore.Time()) {
+			return fmt.Errorf("%w: not yet valid", ErrExpiredProof)
+		}
 	}
 
-	// Check that iat is not in the future (with leeway)
-	if now.Add(v.opts.maxClockSkew).Before(claims.Claims.IssuedAt.Time()) {
-		return fmt.Errorf("%w: invalid iat", ErrInvalidProof)
-	}
-
-	// Check time-based claims with leeway
-	if now.Add(v.opts.maxClockSkew).Before(claims.Claims.NotBefore.Time()) {
-		return fmt.Errorf("%w: not yet valid", ErrExpiredProof)
-	}
-
-	if now.Add(-v.opts.maxClockSkew).After(claims.Claims.Expiry.Time()) {
-		return fmt.Errorf("%w: token has expired", ErrExpiredProof)
+	// exp is optional, but if present, validate it
+	if claims.Claims.Expiry != nil {
+		if now.Add(-v.opts.maxClockSkew).After(claims.Claims.Expiry.Time()) {
+			return fmt.Errorf("%w: token has expired", ErrExpiredProof)
+		}
 	}
 
 	// Validate HTTP method
@@ -298,6 +299,23 @@ func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, 
 		return fmt.Errorf("%w: URI mismatch", ErrInvalidProof)
 	}
 
+	// Validate access token binding
+	if proofOpts.expectedAccessToken != "" {
+		if claims.TokenHash == "" {
+			return fmt.Errorf("%w: missing token hash", ErrInvalidTokenBinding)
+		}
+
+		expectedHash := hashAccessToken(proofOpts.expectedAccessToken)
+		if subtle.ConstantTimeCompare([]byte(claims.TokenHash), []byte(expectedHash)) != 1 {
+			return ErrInvalidTokenBinding
+		}
+	} else {
+		// If we do not expect an access token, assert that we do not have a token hash in the proof
+		if claims.TokenHash != "" {
+			return fmt.Errorf("%w: unexpected token hash", ErrInvalidTokenBinding)
+		}
+	}
+
 	// Validate nonce if validator is configured
 	if v.opts.nonceValidator != nil {
 		if claims.Nonce == "" {
@@ -306,38 +324,25 @@ func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, 
 		if err := v.opts.nonceValidator(ctx, claims.Nonce); err != nil {
 			return err // Return the error directly from the nonce validator
 		}
-	}
-
-	// Check JTI size to prevent memory exhaustion attacks
-	if len(claims.Claims.ID) > MaxJTISize {
-		return fmt.Errorf("%w: jti too large", ErrInvalidProof)
+	} else {
+		// If we do not expect a nonce, assert that we do not have one in the proof
+		if claims.Nonce != "" {
+			return fmt.Errorf("%w: unexpected nonce", ErrInvalidNonce)
+		}
 	}
 
 	if claims.Claims.ID == "" {
 		return fmt.Errorf("%w: jti required but not provided", ErrInvalidProof)
 	}
 
-	// Check for JTI replay if store is configured
-	if v.opts.jtiStore != nil {
-		if claims.Nonce == "" {
-			return fmt.Errorf("%w: nonce required but not provided", ErrInvalidNonce)
-		}
-		if err := v.opts.jtiStore(ctx, claims.Claims.ID, claims.Nonce); err != nil {
-			return fmt.Errorf("failed to check/store JTI: %w", err)
-		}
+	if len(claims.Claims.ID) > MaxJTISize {
+		return fmt.Errorf("%w: jti too large", ErrInvalidProof)
 	}
 
-	// Validate access token binding if required
-	if v.opts.requireAccessTokenBinding || v.opts.expectedAccessToken != "" {
-		if claims.TokenHash == "" {
-			return fmt.Errorf("%w: missing token hash", ErrInvalidTokenBinding)
-		}
-
-		if v.opts.expectedAccessToken != "" {
-			expectedHash := hashAccessToken(v.opts.expectedAccessToken)
-			if subtle.ConstantTimeCompare([]byte(claims.TokenHash), []byte(expectedHash)) != 1 {
-				return ErrInvalidTokenBinding
-			}
+	// Check for JTI replay if store is configured
+	if v.opts.jtiStore != nil {
+		if err := v.opts.jtiStore(ctx, claims.Claims.ID); err != nil {
+			return fmt.Errorf("failed to check/store JTI: %w", err)
 		}
 	}
 
