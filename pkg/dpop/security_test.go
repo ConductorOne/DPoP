@@ -3,7 +3,6 @@ package dpop
 import (
 	"context"
 	"crypto/ed25519"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -36,12 +35,8 @@ func TestSecurityScenarios(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
-			WithNonceValidator(func(ctx context.Context, nonce string) error {
-				if nonce != "test-nonce-1" {
-					return fmt.Errorf("invalid nonce")
-				}
-				return nil
-			}),
+			WithNonceValidator(mockNonceValidator("test-nonce-1")),
+			WithAccessTokenBindingValidator(mockAccessTokenBindingValidator("access-token-123", jwk)),
 		)
 
 		// Create a valid proof

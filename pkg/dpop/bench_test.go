@@ -2,13 +2,11 @@ package dpop
 
 import (
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/base64"
 	"fmt"
 	"testing"
 	"time"
@@ -255,11 +253,14 @@ func BenchmarkValidator(b *testing.B) {
 	url := "https://api.example.com/token"
 	accessToken := "example-access-token"
 
-	// Create a validator
+	// Create a validator with access token binding validator
 	validator := NewValidator(
 		WithJTIStore(noopJTIStore),
 		WithNonceValidator(func(ctx context.Context, n string) error {
 			return nil // Accept any nonce for benchmarking
+		}),
+		WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+			return nil // Accept any access token binding for benchmarking
 		}))
 
 	// Create a proof with access token
@@ -307,27 +308,6 @@ func BenchmarkValidator(b *testing.B) {
 			_, err := validator.ValidateProof(ctx, proofWithToken, method, url,
 				WithProofExpectedAccessToken(accessToken),
 				WithProofExpectedPublicKey(&pubKey))
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-
-	b.Run("ValidateProofWithConfirmationClaims", func(b *testing.B) {
-		pubKey := key.Public()
-		thumbprint, err := pubKey.Thumbprint(crypto.SHA256)
-		if err != nil {
-			b.Fatal(err)
-		}
-		jkt := base64.RawURLEncoding.EncodeToString(thumbprint)
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, proofWithToken, method, url,
-				WithProofExpectedAccessToken(accessToken),
-				WithProofConfirmationClaims(map[string]string{
-					"jkt": jkt,
-				}))
 			if err != nil {
 				b.Fatal(err)
 			}

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ func TestTokenBinding(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithNonceValidator(mockNonceValidator("test-nonce-123")),
+			WithAccessTokenBindingValidator(mockAccessTokenBindingValidator("test-token-123", jwk)),
 		)
 
 		// Create proof with correct token binding
@@ -171,6 +173,7 @@ func TestTokenBinding(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithNonceValidator(mockNonceValidator("test-nonce-123")),
+			WithAccessTokenBindingValidator(mockAccessTokenBindingValidator("test-token-123", jwk)),
 		)
 
 		// Create proof with both token binding and nonce
@@ -201,6 +204,7 @@ func TestTokenBinding(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithNonceValidator(mockNonceValidator("test-nonce-123")),
+			WithAccessTokenBindingValidator(mockAccessTokenBindingValidator("test-token-123", jwk)),
 		)
 
 		// Create multiple proofs with same token binding
@@ -323,6 +327,19 @@ func mockNonceValidator(expectedNonce string) NonceValidator {
 	return func(_ context.Context, nonce string) error {
 		if nonce != expectedNonce {
 			return ErrInvalidNonce
+		}
+		return nil
+	}
+}
+
+// mockAccessTokenBindingValidator creates a simple access token binding validator function for testing
+func mockAccessTokenBindingValidator(expectedAccessToken string, jwk *jose.JSONWebKey) AccessTokenBindingValidator {
+	return func(_ context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+		if accessToken != expectedAccessToken {
+			return fmt.Errorf("%w: expected access token %v, got %v", ErrInvalidTokenBinding, expectedAccessToken, accessToken)
+		}
+		if !jwkIsEqual(jwk, publicKey) {
+			return fmt.Errorf("%w: expected public key %v, got %v", ErrInvalidTokenBinding, jwk, publicKey)
 		}
 		return nil
 	}

@@ -39,44 +39,37 @@ type NonceGenerator func(ctx context.Context) (string, error)
 // NonceValidator is a function that validates server-provided nonces for DPoP proofs
 type NonceValidator func(ctx context.Context, nonce string) error
 
-// ValidationProofOptions configures the behavior of a specific proof validation
-type ValidationProofOptions struct {
+// AccessTokenBindingValidator validates that an access token is bound to a public key
+type AccessTokenBindingValidator func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error
+
+// validationOptions configures the behavior of a specific proof validation
+type validationOptions struct {
 	// ExpectedAccessToken is the expected access token bound to the proof
 	expectedAccessToken string
 
 	// ExpectedPublicKey is the expected public key that should be used to sign the proof
 	expectedPublicKey *jose.JSONWebKey
-
-	// ConfirmationClaims contains the cnf claims from the access token
-	confirmationClaims map[string]string
 }
 
-// ValidationProofOption is a function that configures a ValidationProofOptions
-type ValidationProofOption func(*ValidationProofOptions)
+// ValidationProofOption is a function that configures a validationOptions
+type ValidationProofOption func(*validationOptions)
 
 // WithProofExpectedAccessToken sets the expected access token for a specific proof validation
 func WithProofExpectedAccessToken(token string) ValidationProofOption {
-	return func(opts *ValidationProofOptions) {
+	return func(opts *validationOptions) {
 		opts.expectedAccessToken = token
 	}
 }
 
 // WithProofExpectedPublicKey sets the expected public key that should be used to sign the proof
 func WithProofExpectedPublicKey(key *jose.JSONWebKey) ValidationProofOption {
-	return func(opts *ValidationProofOptions) {
+	return func(opts *validationOptions) {
 		opts.expectedPublicKey = key
 	}
 }
 
-// WithProofConfirmationClaims sets the confirmation claims from the access token
-func WithProofConfirmationClaims(cnf map[string]string) ValidationProofOption {
-	return func(opts *ValidationProofOptions) {
-		opts.confirmationClaims = cnf
-	}
-}
-
-// validationOptions configures the behavior of proof validation
-type validationOptions struct {
+// options configures the behavior of proof validation
+type options struct {
 	// MaxClockSkew is the maximum allowed clock skew for proof validation
 	maxClockSkew time.Duration
 
@@ -91,89 +84,99 @@ type validationOptions struct {
 
 	// Now returns the current time for proof validation
 	now func() time.Time
+
+	// AccessTokenBindingValidator validates that an access token is bound to a public key
+	accessTokenBindingValidator AccessTokenBindingValidator
 }
 
 // Option is a function that configures a validationOptions
-type Option func(*validationOptions)
+type Option func(*options)
 
 // WithMaxClockSkew sets the maximum allowed clock skew
 func WithMaxClockSkew(d time.Duration) Option {
-	return func(opts *validationOptions) {
+	return func(opts *options) {
 		opts.maxClockSkew = d
 	}
 }
 
 // WithNonceValidator sets the nonce validator function
 func WithNonceValidator(v NonceValidator) Option {
-	return func(opts *validationOptions) {
+	return func(opts *options) {
 		opts.nonceValidator = v
 	}
 }
 
 // WithAllowedSignatureAlgorithms sets the allowed signature algorithms
 func WithAllowedSignatureAlgorithms(algs []jose.SignatureAlgorithm) Option {
-	return func(opts *validationOptions) {
+	return func(opts *options) {
 		opts.allowedSignatureAlgorithms = algs
 	}
 }
 
 // WithJTIStore sets the JTI store
 func WithJTIStore(store CheckAndStoreJTI) Option {
-	return func(opts *validationOptions) {
+	return func(opts *options) {
 		opts.jtiStore = store
 	}
 }
 
 // WithNowFunc sets the function used to get the current time
 func WithNowFunc(f func() time.Time) Option {
-	return func(opts *validationOptions) {
+	return func(opts *options) {
 		opts.now = f
+	}
+}
+
+// WithAccessTokenBindingValidator sets the access token binding validator
+func WithAccessTokenBindingValidator(v AccessTokenBindingValidator) Option {
+	return func(opts *options) {
+		opts.accessTokenBindingValidator = v
 	}
 }
 
 // Validator validates DPoP proofs
 type Validator struct {
-	opts *validationOptions
+	opts *options
 }
 
 // NewValidator creates a new DPoP validator with the given options
-func NewValidator(options ...Option) *Validator {
-	opts := &validationOptions{}
+func NewValidator(opts ...Option) *Validator {
+	o := &options{}
 
-	for _, option := range options {
+	for _, option := range opts {
 		if option == nil {
 			continue
 		}
-		option(opts)
+		option(o)
 	}
 
-	if len(opts.allowedSignatureAlgorithms) == 0 {
-		opts.allowedSignatureAlgorithms = []jose.SignatureAlgorithm{
+	if len(o.allowedSignatureAlgorithms) == 0 {
+		o.allowedSignatureAlgorithms = []jose.SignatureAlgorithm{
 			jose.EdDSA,
 			jose.RS256,
 			jose.ES256,
 		}
 	}
 
-	if opts.maxClockSkew == 0 {
-		opts.maxClockSkew = 30 * time.Second
+	if o.maxClockSkew == 0 {
+		o.maxClockSkew = 30 * time.Second
 	}
 
-	if opts.jtiStore == nil {
-		opts.jtiStore = NewMemoryJTIStore().CheckAndStoreJTI
+	if o.jtiStore == nil {
+		o.jtiStore = NewMemoryJTIStore().CheckAndStoreJTI
 	}
 
-	if opts.now == nil {
-		opts.now = time.Now
+	if o.now == nil {
+		o.now = time.Now
 	}
 
-	return &Validator{opts: opts}
+	return &Validator{opts: o}
 }
 
 // ValidateProof validates a DPoP proof for the given HTTP method and URL
 func (v *Validator) ValidateProof(ctx context.Context, proof string, method string, url string, options ...ValidationProofOption) (*Claims, error) {
 	// Initialize validation proof options
-	proofOpts := &ValidationProofOptions{}
+	proofOpts := &validationOptions{}
 	for _, option := range options {
 		option(proofOpts)
 	}
@@ -221,25 +224,6 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 		}
 	}
 
-	// If confirmation claims are provided and contain a jkt claim, validate the JWK thumbprint
-	if proofOpts.confirmationClaims != nil {
-		jkt := proofOpts.confirmationClaims["jkt"]
-		if jkt == "" {
-			return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims", ErrInvalidProof)
-		}
-		proofThumbprint, err := proofKey.Thumbprint(crypto.SHA256)
-		if err != nil {
-			return nil, fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidProof, err)
-		}
-		expectedThumbprint, err := base64.RawURLEncoding.DecodeString(jkt)
-		if err != nil {
-			return nil, fmt.Errorf("%w: invalid jkt format in confirmation claims: %v", ErrInvalidProof, err)
-		}
-		if subtle.ConstantTimeCompare(proofThumbprint, expectedThumbprint) != 1 {
-			return nil, fmt.Errorf("%w: jkt mismatch in confirmation claims", ErrInvalidProof)
-		}
-	}
-
 	// Verify the claims
 	var claims Claims
 	if err := token.Claims(proofKey, &claims); err != nil {
@@ -258,7 +242,7 @@ func (v *Validator) ValidateProof(ctx context.Context, proof string, method stri
 }
 
 // validateClaims validates the claims in a DPoP proof
-func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, url string, proofOpts *ValidationProofOptions) error {
+func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, url string, proofOpts *validationOptions) error {
 	now := v.opts.now()
 
 	// Check required claims
@@ -305,9 +289,18 @@ func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, 
 			return fmt.Errorf("%w: missing token hash", ErrInvalidTokenBinding)
 		}
 
+		// First validate the token hash
 		expectedHash := hashAccessToken(proofOpts.expectedAccessToken)
 		if subtle.ConstantTimeCompare([]byte(claims.TokenHash), []byte(expectedHash)) != 1 {
 			return ErrInvalidTokenBinding
+		}
+
+		// If we have an access token, we must also validate that it is bound to public key in the proof.
+		if v.opts.accessTokenBindingValidator == nil {
+			return fmt.Errorf("%w: no access token binding validator provided", ErrInvalidTokenBinding)
+		}
+		if err := v.opts.accessTokenBindingValidator(ctx, proofOpts.expectedAccessToken, claims.publicKey); err != nil {
+			return err
 		}
 	} else {
 		// If we do not expect an access token, assert that we do not have a token hash in the proof
@@ -347,4 +340,64 @@ func (v *Validator) validateClaims(ctx context.Context, claims *Claims, method, 
 	}
 
 	return nil
+}
+
+// NewJWTAccessTokenBindingValidator creates a validator that checks if a JWT access token
+// is bound to a DPoP proof via the cnf/jkt claim
+func NewJWTAccessTokenBindingValidator(allowedSignatureAlgorithms []jose.SignatureAlgorithm) AccessTokenBindingValidator {
+	return func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+		// Parse the JWT
+		token, err := jwt.ParseSigned(accessToken, allowedSignatureAlgorithms)
+		if err != nil {
+			return fmt.Errorf("%w: failed to parse access token: %v", ErrInvalidTokenBinding, err)
+		}
+
+		// Extract the claims without verification (we're only looking at the cnf claim)
+		var claims map[string]interface{}
+		if err := token.UnsafeClaimsWithoutVerification(&claims); err != nil {
+			return fmt.Errorf("%w: failed to extract claims: %v", ErrInvalidTokenBinding, err)
+		}
+
+		// Check for cnf claim
+		cnfRaw, ok := claims["cnf"]
+		if !ok {
+			return fmt.Errorf("%w: no cnf claim in access token", ErrInvalidTokenBinding)
+		}
+
+		// Convert to map
+		cnf, ok := cnfRaw.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("%w: invalid cnf claim format", ErrInvalidTokenBinding)
+		}
+
+		// Check for jkt claim
+		jktRaw, ok := cnf["jkt"]
+		if !ok {
+			return fmt.Errorf("%w: no jkt in cnf claim", ErrInvalidTokenBinding)
+		}
+
+		jkt, ok := jktRaw.(string)
+		if !ok {
+			return fmt.Errorf("%w: invalid jkt format", ErrInvalidTokenBinding)
+		}
+
+		// Calculate thumbprint of the proof key
+		proofThumbprint, err := publicKey.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return fmt.Errorf("%w: failed to generate proof thumbprint: %v", ErrInvalidTokenBinding, err)
+		}
+
+		// Decode the expected thumbprint
+		expectedThumbprint, err := base64.RawURLEncoding.DecodeString(jkt)
+		if err != nil {
+			return fmt.Errorf("%w: invalid jkt format in token: %v", ErrInvalidTokenBinding, err)
+		}
+
+		// Compare thumbprints
+		if subtle.ConstantTimeCompare(proofThumbprint, expectedThumbprint) != 1 {
+			return fmt.Errorf("%w: jkt mismatch", ErrInvalidTokenBinding)
+		}
+
+		return nil
+	}
 }

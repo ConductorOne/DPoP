@@ -1,8 +1,11 @@
 package dpop_grpc
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -70,6 +73,31 @@ func (s *testServer) TestStream(stream pb.TestService_TestStreamServer) error {
 	}
 }
 
+func nonceValidator(t *testing.T, want string) func(ctx context.Context, nonce string) error {
+	return func(ctx context.Context, nonce string) error {
+		t.Logf("Validating nonce: got %q, want %q", nonce, want)
+		if nonce != want {
+			return dpop.ErrInvalidNonce
+		}
+		return nil
+	}
+}
+
+func accessTokenValidator(t *testing.T, wantToken string, wantThumbprint []byte) func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+	return func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+		t.Logf("Validating access token: got %q, want %q", accessToken, wantToken)
+		if accessToken != wantToken {
+			return fmt.Errorf("%w: access token mismatch", dpop.ErrInvalidTokenBinding)
+		}
+		actualThumbprint, _ := publicKey.Thumbprint(crypto.SHA256)
+		t.Logf("Validating public key: got %q, want %q", hex.EncodeToString(actualThumbprint), hex.EncodeToString(wantThumbprint))
+		if !bytes.Equal(actualThumbprint, wantThumbprint) {
+			return fmt.Errorf("%w: public key mismatch", dpop.ErrInvalidTokenBinding)
+		}
+		return nil
+	}
+}
+
 // mockTokenSource implements oauth2.TokenSource for testing
 type mockTokenSource struct {
 	token    *oauth2.Token
@@ -106,36 +134,30 @@ func TestDPoPGRPC(t *testing.T) {
 		return "test-nonce", nil
 	}
 
+	expectedAccessToken := "test-access-token"
+	expectedThumbprint, err := jwk.Thumbprint(crypto.SHA256)
+	require.NoError(t, err)
+
 	// Create and start the gRPC server with DPoP interceptors
 	s := grpc.NewServer(
 		grpc.UnaryInterceptor(ServerUnaryInterceptor(
 			WithNonceGenerator(staticNonce),
 			WithAuthority("test-endpoint"),
 			WithValidationOptions(
-				dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
-					t.Logf("Validating nonce: %s", nonce)
-					if nonce != "test-nonce" {
-						return dpop.ErrInvalidNonce
-					}
-					return nil
-				}),
+				dpop.WithNonceValidator(nonceValidator(t, "test-nonce")),
 				dpop.WithMaxClockSkew(time.Minute),
 				dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
+				dpop.WithAccessTokenBindingValidator(accessTokenValidator(t, expectedAccessToken, expectedThumbprint)),
 			),
 		)),
 		grpc.StreamInterceptor(ServerStreamInterceptor(
 			WithNonceGenerator(staticNonce),
 			WithAuthority("test-endpoint"),
 			WithValidationOptions(
-				dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
-					t.Logf("Validating nonce: %s", nonce)
-					if nonce != "test-nonce" {
-						return dpop.ErrInvalidNonce
-					}
-					return nil
-				}),
+				dpop.WithNonceValidator(nonceValidator(t, "test-nonce")),
 				dpop.WithMaxClockSkew(time.Minute),
 				dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
+				dpop.WithAccessTokenBindingValidator(accessTokenValidator(t, expectedAccessToken, expectedThumbprint)),
 			),
 		)),
 	)
@@ -230,7 +252,7 @@ func TestDPoPGRPC(t *testing.T) {
 		// Create a new client with a token source that returns a DPoP token
 		tokenSource := &mockTokenSource{
 			token: &oauth2.Token{
-				AccessToken: "test-access-token-with-auth-header",
+				AccessToken: expectedAccessToken,
 				TokenType:   "DPoP",
 				Expiry:      time.Now().Add(time.Hour),
 			},
@@ -248,7 +270,7 @@ func TestDPoPGRPC(t *testing.T) {
 				return time.Now() // Use current time to avoid clock skew issues
 			}),
 			// Add token binding to the proof
-			dpop.WithAccessToken("test-access-token-with-auth-header"),
+			dpop.WithAccessToken(expectedAccessToken),
 		})
 		require.NoError(t, err)
 		creds.requireTLS = false
@@ -503,6 +525,10 @@ func TestClientInterceptors(t *testing.T) {
 				}),
 				dpop.WithMaxClockSkew(time.Minute),
 				dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
+				dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+					// Simple validator that accepts any token bound to the expected key
+					return nil
+				}),
 			),
 		)),
 		grpc.StreamInterceptor(ServerStreamInterceptor(
@@ -518,6 +544,10 @@ func TestClientInterceptors(t *testing.T) {
 				}),
 				dpop.WithMaxClockSkew(time.Minute),
 				dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
+				dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+					// Simple validator that accepts any token bound to the expected key
+					return nil
+				}),
 			),
 		)),
 	)

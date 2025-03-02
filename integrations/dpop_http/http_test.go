@@ -1,7 +1,9 @@
 package dpop_http
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
@@ -15,6 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 )
+
+func jwkIsEqual(a, b *jose.JSONWebKey) bool {
+	ah, err := a.Thumbprint(crypto.SHA256)
+	if err != nil {
+		panic(err)
+	}
+	bh, err := b.Thumbprint(crypto.SHA256)
+	if err != nil {
+		panic(err)
+	}
+	return bytes.Equal(ah, bh)
+}
 
 // mockTokenSource implements oauth2.TokenSource for testing
 type mockTokenSource struct {
@@ -66,10 +80,18 @@ func TestDPoPRoundTrip(t *testing.T) {
 
 	// Create a test server with DPoP middleware
 	handler := &testHandler{t: t}
-	mw := Middleware(WithValidationOptions(dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
-		require.Equal(t, "test-nonce", nonce)
-		return nil
-	})), WithErrorHandler(func(rw http.ResponseWriter, r *http.Request, err error) {
+	validatorOpts := []dpop.Option{
+		dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
+			require.Equal(t, "test-nonce", nonce)
+			return nil
+		}),
+		dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+			require.Equal(t, "test-access-token", accessToken)
+			require.True(t, jwkIsEqual(jwk, publicKey))
+			return nil
+		}),
+	}
+	mw := Middleware(WithValidationOptions(validatorOpts...), WithErrorHandler(func(rw http.ResponseWriter, r *http.Request, err error) {
 		t.Logf("Error: %v", err)
 	}))
 	server := httptest.NewServer(mw(handler))
@@ -389,12 +411,19 @@ func TestDPoPNonceHandling(t *testing.T) {
 			return nonceValue, nil
 		}),
 		// Add validation options to validate the nonce
-		WithValidationOptions(dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
-			if nonce != nonceValue {
-				return dpop.ErrInvalidNonce
-			}
-			return nil
-		})),
+		WithValidationOptions(
+			dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != nonceValue {
+					return dpop.ErrInvalidNonce
+				}
+				return nil
+			}),
+			dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+				require.Equal(t, "test-token", accessToken)
+				require.True(t, jwkIsEqual(jwk, publicKey))
+				return nil
+			}),
+		),
 	}
 
 	mw := Middleware(serverOpts...)
