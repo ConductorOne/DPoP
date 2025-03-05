@@ -237,7 +237,7 @@ func BenchmarkProofer(b *testing.B) {
 }
 
 // noopJTIStore is a no-op JTI store for benchmarking
-func noopJTIStore(ctx context.Context, jti string, nonce string) error {
+func noopJTIStore(ctx context.Context, jti string) error {
 	return nil
 }
 
@@ -252,119 +252,62 @@ func BenchmarkValidator(b *testing.B) {
 	method := "POST"
 	url := "https://api.example.com/token"
 	accessToken := "example-access-token"
-	nonce := generateNonce(0) // Initial nonce for proof generation
 
-	// Generate proofs for validation benchmarks
-	basicProof, err := proofer.CreateProof(ctx, method, url,
-		WithStaticNonce(nonce))
-	if err != nil {
-		b.Fatal(err)
-	}
+	// Create a validator with access token binding validator
+	validator := NewValidator(
+		WithJTIStore(noopJTIStore),
+		WithNonceValidator(func(ctx context.Context, n string) error {
+			return nil // Accept any nonce for benchmarking
+		}),
+		WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+			return nil // Accept any access token binding for benchmarking
+		}))
 
+	// Create a proof with access token
 	proofWithToken, err := proofer.CreateProof(ctx, method, url,
 		WithAccessToken(accessToken),
-		WithStaticNonce(nonce))
+		WithStaticNonce("test-nonce"),
+		WithValidityDuration(time.Minute))
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	proofWithNonce, err := proofer.CreateProof(ctx, method, url,
-		WithStaticNonce(nonce))
+	// Create a proof without access token
+	proofWithoutToken, err := proofer.CreateProof(ctx, method, url,
+		WithStaticNonce("test-nonce"),
+		WithValidityDuration(time.Minute))
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	proofWithAll, err := proofer.CreateProof(ctx, method, url,
-		WithAccessToken(accessToken),
-		WithStaticNonce(nonce),
-		WithAdditionalClaims(map[string]interface{}{"custom_claim": "test-value"}))
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Create a public key for validation
-	pubKey := &jose.JSONWebKey{
-		Key:       key.Key.(ed25519.PrivateKey).Public(),
-		KeyID:     key.KeyID,
-		Algorithm: key.Algorithm,
-		Use:       key.Use,
-	}
-
-	b.Run("BasicValidation", func(b *testing.B) {
-		validator := NewValidator(
-			WithNonceValidator(func(ctx context.Context, n string) error {
-				return nil // Accept any nonce for benchmarking
-			}),
-			WithJTIStore(noopJTIStore))
+	b.Run("ValidateProofWithAccessToken", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, basicProof, method, url)
+			_, err := validator.ValidateProof(ctx, proofWithToken, method, url,
+				WithProofExpectedAccessToken(accessToken))
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 
-	b.Run("ValidationWithAccessToken", func(b *testing.B) {
-		validator := NewValidator(
-			WithExpectedAccessToken(accessToken),
-			WithRequireAccessTokenBinding(true),
-			WithNonceValidator(func(ctx context.Context, n string) error {
-				return nil // Accept any nonce for benchmarking
-			}),
-			WithJTIStore(noopJTIStore))
+	b.Run("ValidateProofWithoutAccessToken", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, proofWithToken, method, url)
+			_, err := validator.ValidateProof(ctx, proofWithoutToken, method, url)
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
 
-	b.Run("ValidationWithNonce", func(b *testing.B) {
-		validator := NewValidator(
-			WithNonceValidator(func(ctx context.Context, n string) error {
-				return nil // Accept any nonce for benchmarking
-			}),
-			WithJTIStore(noopJTIStore))
+	b.Run("ValidateProofWithPublicKey", func(b *testing.B) {
+		pubKey := key.Public()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, proofWithNonce, method, url)
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-
-	b.Run("ValidationWithExpectedKey", func(b *testing.B) {
-		validator := NewValidator(
-			WithExpectedPublicKey(pubKey),
-			WithNonceValidator(func(ctx context.Context, n string) error {
-				return nil // Accept any nonce for benchmarking
-			}),
-			WithJTIStore(noopJTIStore))
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, basicProof, method, url)
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-
-	b.Run("ValidationWithAllOptions", func(b *testing.B) {
-		validator := NewValidator(
-			WithExpectedAccessToken(accessToken),
-			WithRequireAccessTokenBinding(true),
-			WithNonceValidator(func(ctx context.Context, n string) error {
-				return nil // Accept any nonce for benchmarking
-			}),
-			WithJTIStore(noopJTIStore),
-			WithExpectedPublicKey(pubKey))
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_, err := validator.ValidateProof(ctx, proofWithAll, method, url)
+			_, err := validator.ValidateProof(ctx, proofWithToken, method, url,
+				WithProofExpectedAccessToken(accessToken),
+				WithProofExpectedPublicKey(&pubKey))
 			if err != nil {
 				b.Fatal(err)
 			}

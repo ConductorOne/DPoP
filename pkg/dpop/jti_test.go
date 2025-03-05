@@ -22,39 +22,23 @@ func TestMemoryJTIStore(t *testing.T) {
 		defer store.Stop()
 
 		jti := "test-jti-1"
-		nonce := "test-nonce-1"
 
 		// First attempt should succeed
-		err := store.CheckAndStoreJTI(ctx, jti, nonce)
+		err := store.CheckAndStoreJTI(ctx, jti)
 		require.NoError(t, err)
 
-		// Second attempt with same JTI and nonce should fail
-		err = store.CheckAndStoreJTI(ctx, jti, nonce)
+		// Second attempt with same JTI should fail
+		err = store.CheckAndStoreJTI(ctx, jti)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "duplicate jti")
 
-		// Different JTI with same nonce should succeed
-		err = store.CheckAndStoreJTI(ctx, "different-jti", nonce)
+		// Different JTI should succeed
+		err = store.CheckAndStoreJTI(ctx, "different-jti")
 		require.NoError(t, err)
 
-		// Same JTI with different nonce should succeed
-		err = store.CheckAndStoreJTI(ctx, jti, "different-nonce")
-		require.NoError(t, err)
-	})
-
-	t.Run("empty nonce handling", func(t *testing.T) {
-		store := NewMemoryJTIStore()
-		defer store.Stop()
-
-		jti := "test-jti-2"
-
-		// Empty nonce should always succeed and not be tracked
-		err := store.CheckAndStoreJTI(ctx, jti, "")
-		require.NoError(t, err)
-
-		// Second attempt with empty nonce should also succeed
-		err = store.CheckAndStoreJTI(ctx, jti, "")
-		require.NoError(t, err)
+		// Different JTI should fail
+		err = store.CheckAndStoreJTI(ctx, "different-jti")
+		require.Error(t, err)
 	})
 
 	t.Run("cache cleanup", func(t *testing.T) {
@@ -63,9 +47,7 @@ func TestMemoryJTIStore(t *testing.T) {
 
 		// Add some entries
 		for i := 0; i < 5; i++ {
-			err := store.CheckAndStoreJTI(ctx,
-				fmt.Sprintf("jti-%d", i),
-				fmt.Sprintf("nonce-%d", i))
+			err := store.CheckAndStoreJTI(ctx, fmt.Sprintf("jti-%d", i))
 			require.NoError(t, err)
 		}
 
@@ -97,10 +79,15 @@ func TestJTIReplayPrevention(t *testing.T) {
 	validator := NewValidator(
 		WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 		WithJTIStore(store.CheckAndStoreJTI),
-		WithRequireAccessTokenBinding(false),
+		WithNonceValidator(func(ctx context.Context, nonce string) error {
+			if nonce != "test-nonce-1" {
+				return fmt.Errorf("invalid nonce")
+			}
+			return nil
+		}),
 	)
 
-	t.Run("reject duplicate JTI with same nonce", func(t *testing.T) {
+	t.Run("reject duplicate JTI", func(t *testing.T) {
 		// Create a valid proof with nonce
 		proof, err := proofer.CreateProof(
 			context.Background(),
@@ -129,49 +116,7 @@ func TestJTIReplayPrevention(t *testing.T) {
 			"https://resource.example.org/protected",
 		)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate jti for this nonce")
-	})
-
-	t.Run("accept same JTI with different nonce", func(t *testing.T) {
-		// Create first proof with first nonce
-		proof1, err := proofer.CreateProof(
-			context.Background(),
-			"GET",
-			"https://resource.example.org/protected",
-			WithValidityDuration(10*time.Minute),
-			WithStaticNonce("test-nonce-2"),
-		)
-		require.NoError(t, err)
-
-		// First validation should succeed
-		claims1, err := validator.ValidateProof(
-			context.Background(),
-			proof1,
-			"GET",
-			"https://resource.example.org/protected",
-		)
-		require.NoError(t, err)
-		require.NotNil(t, claims1)
-
-		// Create second proof with second nonce
-		proof2, err := proofer.CreateProof(
-			context.Background(),
-			"GET",
-			"https://resource.example.org/protected",
-			WithValidityDuration(10*time.Minute),
-			WithStaticNonce("test-nonce-3"),
-		)
-		require.NoError(t, err)
-
-		// Second validation should also succeed
-		claims2, err := validator.ValidateProof(
-			context.Background(),
-			proof2,
-			"GET",
-			"https://resource.example.org/protected",
-		)
-		require.NoError(t, err)
-		require.NotNil(t, claims2)
+		assert.Contains(t, err.Error(), "duplicate jti")
 	})
 }
 
@@ -197,6 +142,12 @@ func TestJTIHandling(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
+			WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != "test-nonce-1" {
+					return fmt.Errorf("invalid nonce")
+				}
+				return nil
+			}),
 		)
 
 		// Create and validate proof
@@ -219,6 +170,12 @@ func TestJTIHandling(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
+			WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != "test-nonce-1" {
+					return fmt.Errorf("invalid nonce")
+				}
+				return nil
+			}),
 		)
 
 		// Create first proof with nonce
@@ -238,7 +195,7 @@ func TestJTIHandling(t *testing.T) {
 		// Second validation with same proof should fail (replay attempt)
 		_, err = validator.ValidateProof(ctx, proof, "GET", "https://resource.example.org/protected")
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate jti for this nonce")
+		assert.Contains(t, err.Error(), "duplicate jti")
 	})
 
 	t.Run("JTI size limits", func(t *testing.T) {
@@ -285,47 +242,17 @@ func TestJTIHandling(t *testing.T) {
 		assert.Contains(t, err.Error(), "jti too large")
 	})
 
-	t.Run("JTI persistence across nonces", func(t *testing.T) {
-		store := NewMemoryJTIStore()
-		validator := NewValidator(
-			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
-			WithJTIStore(store.CheckAndStoreJTI),
-		)
-
-		// Create first proof with nonce
-		proof1, err := proofer.CreateProof(
-			ctx,
-			"GET",
-			"https://resource.example.org/protected",
-			WithValidityDuration(5*time.Minute),
-			WithStaticNonce("nonce1"),
-		)
-		require.NoError(t, err)
-
-		// First validation should succeed
-		_, err = validator.ValidateProof(ctx, proof1, "GET", "https://resource.example.org/protected")
-		require.NoError(t, err)
-
-		// Create second proof with same JTI but different nonce
-		proof2, err := proofer.CreateProof(
-			ctx,
-			"GET",
-			"https://resource.example.org/protected",
-			WithValidityDuration(5*time.Minute),
-			WithStaticNonce("nonce2"),
-		)
-		require.NoError(t, err)
-
-		// Second validation should succeed (different nonce)
-		_, err = validator.ValidateProof(ctx, proof2, "GET", "https://resource.example.org/protected")
-		require.NoError(t, err)
-	})
-
 	t.Run("concurrent JTI validation", func(t *testing.T) {
 		store := NewMemoryJTIStore()
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
+			WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != "test-nonce-1" {
+					return fmt.Errorf("invalid nonce")
+				}
+				return nil
+			}),
 		)
 
 		// Create a proof to use
@@ -372,18 +299,18 @@ func TestMemoryJTIStoreOperations(t *testing.T) {
 		defer store.Stop()
 
 		// Store a JTI
-		err := store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err := store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.NoError(t, err)
 
 		// Immediate check should fail (duplicate)
-		err = store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err = store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.Error(t, err)
 
 		// Wait for TTL to expire
 		time.Sleep(2 * time.Second)
 
 		// After TTL expires, should be able to reuse the JTI
-		err = store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err = store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.NoError(t, err)
 	})
 
@@ -392,11 +319,11 @@ func TestMemoryJTIStoreOperations(t *testing.T) {
 		defer store.Stop()
 
 		// Store a JTI
-		err := store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err := store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.NoError(t, err)
 
 		// Immediate check should fail (duplicate)
-		err = store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err = store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.Error(t, err)
 	})
 
@@ -405,11 +332,11 @@ func TestMemoryJTIStoreOperations(t *testing.T) {
 		defer store.Stop()
 
 		// First store should succeed
-		err := store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err := store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.NoError(t, err)
 
 		// Second store should fail
-		err = store.CheckAndStoreJTI(ctx, "test-jti", "test-nonce")
+		err = store.CheckAndStoreJTI(ctx, "test-jti")
 		assert.Error(t, err)
 	})
 
@@ -419,7 +346,7 @@ func TestMemoryJTIStoreOperations(t *testing.T) {
 
 		// Store multiple different JTIs
 		for i := 0; i < 5; i++ {
-			err := store.CheckAndStoreJTI(ctx, fmt.Sprintf("jti-%d", i), "nonce")
+			err := store.CheckAndStoreJTI(ctx, fmt.Sprintf("jti-%d", i))
 			assert.NoError(t, err)
 		}
 	})
@@ -431,7 +358,7 @@ func TestMemoryJTIStoreOperations(t *testing.T) {
 		cancelCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		err := store.CheckAndStoreJTI(cancelCtx, "test-jti", "test-nonce")
+		err := store.CheckAndStoreJTI(cancelCtx, "test-jti")
 		assert.Error(t, err)
 	})
 }

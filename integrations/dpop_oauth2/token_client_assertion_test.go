@@ -32,12 +32,7 @@ type mockAuthServer struct {
 func (m *mockAuthServer) setupValidator() {
 	opts := []dpop.Option{
 		dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
-		dpop.WithJTIStore(func(ctx context.Context, jti string, nonce string) error {
-			if _, exists := m.seenJTIs[jti]; exists {
-				m.replayDetected = true
-				return fmt.Errorf("replay detected")
-			}
-			m.seenJTIs[jti] = true
+		dpop.WithJTIStore(func(ctx context.Context, jti string) error {
 			return nil
 		}),
 		dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
@@ -65,6 +60,12 @@ func newMockAuthServer(t *testing.T, jwk *jose.JSONWebKey) *mockAuthServer {
 	mas.validator = dpop.NewValidator(
 		dpop.WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 		dpop.WithJTIStore(dpop.NewMemoryJTIStore().CheckAndStoreJTI),
+		dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
+			if nonce != mas.nonce {
+				return fmt.Errorf("invalid nonce")
+			}
+			return nil
+		}),
 	)
 
 	mas.server = httptest.NewServer(http.HandlerFunc(mas.handleToken))

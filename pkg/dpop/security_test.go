@@ -35,6 +35,8 @@ func TestSecurityScenarios(t *testing.T) {
 		validator := NewValidator(
 			WithAllowedSignatureAlgorithms([]jose.SignatureAlgorithm{jose.EdDSA}),
 			WithJTIStore(store.CheckAndStoreJTI),
+			WithNonceValidator(mockNonceValidator("test-nonce-1")),
+			WithAccessTokenBindingValidator(mockAccessTokenBindingValidator("access-token-123", jwk)),
 		)
 
 		// Create a valid proof
@@ -49,13 +51,25 @@ func TestSecurityScenarios(t *testing.T) {
 		require.NoError(t, err)
 
 		// First use should succeed
-		_, err = validator.ValidateProof(ctx, proof, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(
+			ctx,
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("access-token-123"),
+		)
 		require.NoError(t, err)
 
 		// Replay attempt should fail
-		_, err = validator.ValidateProof(ctx, proof, "GET", "https://resource.example.org/protected")
+		_, err = validator.ValidateProof(
+			ctx,
+			proof,
+			"GET",
+			"https://resource.example.org/protected",
+			WithProofExpectedAccessToken("access-token-123"),
+		)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate jti for this nonce")
+		assert.Contains(t, err.Error(), "duplicate jti")
 	})
 
 	t.Run("token type confusion attack", func(t *testing.T) {

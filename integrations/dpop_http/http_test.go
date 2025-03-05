@@ -1,7 +1,9 @@
 package dpop_http
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
@@ -15,6 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 )
+
+func jwkIsEqual(a, b *jose.JSONWebKey) bool {
+	ah, err := a.Thumbprint(crypto.SHA256)
+	if err != nil {
+		panic(err)
+	}
+	bh, err := b.Thumbprint(crypto.SHA256)
+	if err != nil {
+		panic(err)
+	}
+	return bytes.Equal(ah, bh)
+}
 
 // mockTokenSource implements oauth2.TokenSource for testing
 type mockTokenSource struct {
@@ -66,7 +80,20 @@ func TestDPoPRoundTrip(t *testing.T) {
 
 	// Create a test server with DPoP middleware
 	handler := &testHandler{t: t}
-	mw := Middleware()
+	validatorOpts := []dpop.Option{
+		dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
+			require.Equal(t, "test-nonce", nonce)
+			return nil
+		}),
+		dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+			require.Equal(t, "test-access-token", accessToken)
+			require.True(t, jwkIsEqual(jwk, publicKey))
+			return nil
+		}),
+	}
+	mw := Middleware(WithValidationOptions(validatorOpts...), WithErrorHandler(func(rw http.ResponseWriter, r *http.Request, err error) {
+		t.Logf("Error: %v", err)
+	}))
 	server := httptest.NewServer(mw(handler))
 	defer server.Close()
 
@@ -190,14 +217,106 @@ func TestDPoPErrorCases(t *testing.T) {
 		expectedStatus int
 	}{
 		{
-			name: "Missing DPoP header",
+			name: "Not a DPoP request",
 			setupClient: func() *http.Client {
 				return &http.Client{} // Plain client with no DPoP
+			},
+			expectedStatus: http.StatusOK, // Should pass through without DPoP validation
+		},
+		{
+			name: "Included DPoP header but not a DPoP access token",
+			setupClient: func() *http.Client {
+				pub, priv, _ := ed25519.GenerateKey(nil)
+				require.NotNil(t, pub)
+
+				jwk := &jose.JSONWebKey{
+					Key:       priv,
+					KeyID:     "test-key",
+					Algorithm: string(jose.EdDSA),
+					Use:       "sig",
+				}
+
+				// Create a custom transport that adds DPoP header but uses Bearer token
+				return &http.Client{
+					Transport: &customTransport{
+						base:      http.DefaultTransport,
+						jwk:       jwk,
+						token:     "test-token",
+						tokenType: "Bearer", // Not DPoP
+					},
+				}
+			},
+			expectedStatus: http.StatusUnauthorized, // Should fail with invalid auth scheme
+		},
+		{
+			name: "Access token is DPoP scheme but no proof provided",
+			setupClient: func() *http.Client {
+				// Create a client that sends DPoP token type but no DPoP header
+				return &http.Client{
+					Transport: &customTransport{
+						base:      http.DefaultTransport,
+						token:     "test-token",
+						tokenType: "DPoP",
+						skipDPoP:  true, // Don't add DPoP header
+					},
+				}
+			},
+			expectedStatus: http.StatusUnauthorized, // Should fail with missing DPoP header
+		},
+		{
+			name: "Invalid proof (wrong HTTP method)",
+			setupClient: func() *http.Client {
+				pub, priv, _ := ed25519.GenerateKey(nil)
+				require.NotNil(t, pub)
+
+				jwk := &jose.JSONWebKey{
+					Key:       priv,
+					KeyID:     "test-key",
+					Algorithm: string(jose.EdDSA),
+					Use:       "sig",
+				}
+
+				// Create a custom transport that adds DPoP header with wrong method
+				return &http.Client{
+					Transport: &customTransport{
+						base:         http.DefaultTransport,
+						jwk:          jwk,
+						token:        "test-token",
+						tokenType:    "DPoP",
+						customMethod: "POST", // Wrong method (will be GET)
+					},
+				}
 			},
 			expectedStatus: http.StatusUnauthorized,
 		},
 		{
-			name: "Wrong HTTP method in proof",
+			name: "Invalid proof (wrong endpoint)",
+			setupClient: func() *http.Client {
+				pub, priv, _ := ed25519.GenerateKey(nil)
+				require.NotNil(t, pub)
+
+				jwk := &jose.JSONWebKey{
+					Key:       priv,
+					KeyID:     "test-key",
+					Algorithm: string(jose.EdDSA),
+					Use:       "sig",
+				}
+
+				// Create a custom transport that adds DPoP header with wrong URL
+				return &http.Client{
+					Transport: &customTransport{
+						base:      http.DefaultTransport,
+						jwk:       jwk,
+						token:     "test-token",
+						tokenType: "DPoP",
+						customURL: "https://wrong-endpoint.com/resource", // Wrong URL
+					},
+				}
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "Old proof",
 			setupClient: func() *http.Client {
 				pub, priv, _ := ed25519.GenerateKey(nil)
 				require.NotNil(t, pub) // Keep the public key reference to prevent GC
@@ -223,6 +342,32 @@ func TestDPoPErrorCases(t *testing.T) {
 					}),
 				)
 				return &http.Client{Transport: transport}
+			},
+			expectedStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "Invalid token binding",
+			setupClient: func() *http.Client {
+				pub, priv, _ := ed25519.GenerateKey(nil)
+				require.NotNil(t, pub)
+
+				jwk := &jose.JSONWebKey{
+					Key:       priv,
+					KeyID:     "test-key",
+					Algorithm: string(jose.EdDSA),
+					Use:       "sig",
+				}
+
+				// Create a custom transport with mismatched token binding
+				return &http.Client{
+					Transport: &customTransport{
+						base:       http.DefaultTransport,
+						jwk:        jwk,
+						token:      "test-token",
+						tokenType:  "DPoP",
+						boundToken: "different-token", // Mismatch with the token in Authorization header
+					},
+				}
 			},
 			expectedStatus: http.StatusUnauthorized,
 		},
@@ -265,6 +410,20 @@ func TestDPoPNonceHandling(t *testing.T) {
 		WithNonceGenerator(func(ctx context.Context) (string, error) {
 			return nonceValue, nil
 		}),
+		// Add validation options to validate the nonce
+		WithValidationOptions(
+			dpop.WithNonceValidator(func(ctx context.Context, nonce string) error {
+				if nonce != nonceValue {
+					return dpop.ErrInvalidNonce
+				}
+				return nil
+			}),
+			dpop.WithAccessTokenBindingValidator(func(ctx context.Context, accessToken string, publicKey *jose.JSONWebKey) error {
+				require.Equal(t, "test-token", accessToken)
+				require.True(t, jwkIsEqual(jwk, publicKey))
+				return nil
+			}),
+		),
 	}
 
 	mw := Middleware(serverOpts...)
@@ -285,22 +444,17 @@ func TestDPoPNonceHandling(t *testing.T) {
 	// Verify server sent nonce
 	assert.Equal(t, nonceValue, resp.Header.Get(dpop.NonceHeaderName))
 
-	// Create DPoP client with the received nonce
-	transport, err := NewTransport(
-		http.DefaultTransport,
-		jwk,
-		&mockTokenSource{
-			token: &oauth2.Token{
-				AccessToken: "test-token",
-				TokenType:   "DPoP",
-			},
-		},
-		dpop.WithStaticNonce(nonceValue),
-	)
-	require.NoError(t, err)
+	// Create a custom transport with the received nonce
+	customTransport := &customTransport{
+		base:      http.DefaultTransport,
+		jwk:       jwk,
+		token:     "test-token",
+		tokenType: "DPoP",
+		nonce:     nonceValue,
+	}
 
 	// Second request with correct nonce should succeed
-	client = &http.Client{Transport: transport}
+	client = &http.Client{Transport: customTransport}
 	req, err = http.NewRequestWithContext(context.Background(), "GET", server.URL+"/api/resource", nil)
 	require.NoError(t, err)
 
@@ -309,4 +463,70 @@ func TestDPoPNonceHandling(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// customTransport is a test helper that allows fine-grained control over headers
+type customTransport struct {
+	base         http.RoundTripper
+	jwk          *jose.JSONWebKey
+	token        string
+	tokenType    string
+	skipDPoP     bool
+	customMethod string
+	customURL    string
+	boundToken   string
+	nonce        string
+}
+
+func (t *customTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Set Authorization header
+	if t.token != "" {
+		req.Header.Set("Authorization", t.tokenType+" "+t.token)
+	}
+
+	// Add DPoP header if needed
+	if !t.skipDPoP && t.jwk != nil {
+		proofer, err := dpop.NewProofer(t.jwk)
+		if err != nil {
+			return nil, err
+		}
+
+		// Determine which method and URL to use for the proof
+		method := req.Method
+		if t.customMethod != "" {
+			method = t.customMethod
+		}
+
+		url := req.URL.String()
+		if t.customURL != "" {
+			url = t.customURL
+		}
+
+		// Create proof options
+		var opts []dpop.ProofOption
+		if t.boundToken != "" {
+			opts = append(opts, dpop.WithAccessToken(t.boundToken))
+		} else if t.token != "" && t.tokenType == "DPoP" {
+			opts = append(opts, dpop.WithAccessToken(t.token))
+		}
+
+		// Add nonce if provided
+		if t.nonce != "" {
+			opts = append(opts, dpop.WithStaticNonce(t.nonce))
+		}
+
+		// Create the proof with potentially incorrect method/URL
+		proof, err := proofer.CreateProof(req.Context(), method, url, opts...)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set(dpop.HeaderName, proof)
+	}
+
+	// Use the base transport for the actual request
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
