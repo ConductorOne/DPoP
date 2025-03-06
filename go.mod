@@ -1,6 +1,6 @@
 module github.com/conductorone/dpop
 
-go 1.23.6
+go 1.23.4
 
 require (
 	github.com/go-jose/go-jose/v4 v4.0.4

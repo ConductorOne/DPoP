@@ -1,6 +1,6 @@
 module github.com/conductorone/dpop/integrations/dpop_oauth2
 
-go 1.23.6
+go 1.23.4
 
 require (
 	github.com/conductorone/dpop v0.0.2
