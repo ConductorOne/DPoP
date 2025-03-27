@@ -26,7 +26,7 @@ var (
 
 // JTIStore implements JTI replay protection using Redis
 type JTIStore struct {
-	client *redis.Client
+	client redis.UniversalClient
 	logger *zap.Logger
 	ttl    time.Duration
 }
@@ -54,7 +54,7 @@ func WithLogger(logger *zap.Logger) Option {
 }
 
 // NewJTIStore creates a new Redis-backed JTI store
-func NewJTIStore(client *redis.Client, opts ...Option) (*JTIStore, error) {
+func NewJTIStore(client redis.UniversalClient, opts ...Option) (*JTIStore, error) {
 	s := &JTIStore{
 		client: client,
 		logger: zap.NewNop(), // Default to no-op logger
