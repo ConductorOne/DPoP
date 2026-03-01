@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/conductorone/dpop/pkg/dpop"
 	"github.com/go-jose/go-jose/v4"
@@ -440,4 +441,234 @@ func TestTokenSource_ReplayPrevention(t *testing.T) {
 
 	// Verify server detected no replays
 	require.False(t, mas.replayDetected, "expected no replay detection")
+}
+
+func TestTokenSource_RetryOnTimeout(t *testing.T) {
+	// Generate test keys
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	pubJWK := &jose.JSONWebKey{
+		Key:       pub,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	t.Run("retries on timeout then succeeds", func(t *testing.T) {
+		requestCount := 0
+		mas := newMockAuthServer(t, pubJWK)
+		defer mas.Close()
+
+		// Wrap the handler to simulate timeout on first request by delaying
+		origHandler := mas.server.Config.Handler
+		mas.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			if requestCount <= 1 {
+				// Delay long enough that the short timeout expires, but respect
+				// the request context so the server can shut down cleanly.
+				timer := time.NewTimer(5 * time.Second)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+				}
+				return
+			}
+			origHandler.ServeHTTP(w, r)
+		})
+
+		tokenURL, err := url.Parse(mas.server.URL + "/token")
+		require.NoError(t, err)
+
+		store := NewNonceStore()
+		ts, err := NewTokenSource(
+			proofer,
+			tokenURL,
+			"test-client",
+			privJWK,
+			WithHTTPClient(mas.server.Client()),
+			WithNonceStore(store),
+			WithTokenTimeout(500*time.Millisecond),
+			WithMaxRetries(2),
+		)
+		require.NoError(t, err)
+
+		token, err := ts.Token()
+		require.NoError(t, err, "expected retry to succeed")
+		require.NotNil(t, token)
+		require.Equal(t, "test_access_token", token.AccessToken)
+		require.True(t, requestCount >= 2, "expected at least 2 requests (1 timeout + 1 success)")
+	})
+
+	t.Run("does not retry on non-transient error", func(t *testing.T) {
+		requestCount := 0
+		// Create a server that always returns 401
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":             "invalid_client",
+				"error_description": "Client authentication failed",
+			})
+		}))
+		defer server.Close()
+
+		tokenURL, err := url.Parse(server.URL + "/token")
+		require.NoError(t, err)
+
+		store := NewNonceStore()
+		ts, err := NewTokenSource(
+			proofer,
+			tokenURL,
+			"test-client",
+			privJWK,
+			WithHTTPClient(server.Client()),
+			WithNonceStore(store),
+			WithMaxRetries(3),
+		)
+		require.NoError(t, err)
+
+		token, err := ts.Token()
+		require.Error(t, err, "expected error on auth failure")
+		require.Nil(t, token)
+		require.Equal(t, 1, requestCount, "expected exactly 1 request (no retries for non-transient error)")
+	})
+
+	t.Run("exhausts retries on persistent timeout", func(t *testing.T) {
+		requestCount := 0
+		// Create a server that always delays until context is done
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+			}
+		}))
+		defer server.Close()
+
+		tokenURL, err := url.Parse(server.URL + "/token")
+		require.NoError(t, err)
+
+		store := NewNonceStore()
+		ts, err := NewTokenSource(
+			proofer,
+			tokenURL,
+			"test-client",
+			privJWK,
+			WithHTTPClient(server.Client()),
+			WithNonceStore(store),
+			WithTokenTimeout(500*time.Millisecond),
+			WithMaxRetries(1),
+		)
+		require.NoError(t, err)
+
+		token, err := ts.Token()
+		require.Error(t, err, "expected error after exhausting retries")
+		require.Nil(t, token)
+		require.Contains(t, err.Error(), "all 2 retry attempts failed")
+		require.Equal(t, 2, requestCount, "expected 2 requests (initial + 1 retry)")
+	})
+
+	t.Run("zero retries disables retry", func(t *testing.T) {
+		requestCount := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+			}
+		}))
+		defer server.Close()
+
+		tokenURL, err := url.Parse(server.URL + "/token")
+		require.NoError(t, err)
+
+		ts, err := NewTokenSource(
+			proofer,
+			tokenURL,
+			"test-client",
+			privJWK,
+			WithHTTPClient(server.Client()),
+			WithTokenTimeout(500*time.Millisecond),
+			WithMaxRetries(0),
+		)
+		require.NoError(t, err)
+
+		token, err := ts.Token()
+		require.Error(t, err, "expected error with no retries")
+		require.Nil(t, token)
+		require.Equal(t, 1, requestCount, "expected exactly 1 request (no retries)")
+	})
+}
+
+func TestIsTransientError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "context deadline exceeded",
+			err:      context.DeadlineExceeded,
+			expected: true,
+		},
+		{
+			name:     "wrapped deadline exceeded",
+			err:      fmt.Errorf("dpop_oauth2: token request failed: failed to execute request: context deadline exceeded"),
+			expected: true,
+		},
+		{
+			name:     "connection refused",
+			err:      fmt.Errorf("dial tcp 127.0.0.1:8080: connection refused"),
+			expected: true,
+		},
+		{
+			name:     "connection reset",
+			err:      fmt.Errorf("read tcp: connection reset by peer"),
+			expected: true,
+		},
+		{
+			name:     "i/o timeout",
+			err:      fmt.Errorf("dial tcp: i/o timeout"),
+			expected: true,
+		},
+		{
+			name:     "auth error not transient",
+			err:      fmt.Errorf("dpop_oauth2: invalid_client - Client authentication failed"),
+			expected: false,
+		},
+		{
+			name:     "invalid token not transient",
+			err:      ErrInvalidToken,
+			expected: false,
+		},
+		{
+			name:     "proof creation not transient",
+			err:      ErrProofCreationFailed,
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isTransientError(tc.err)
+			require.Equal(t, tc.expected, result)
+		})
+	}
 }
