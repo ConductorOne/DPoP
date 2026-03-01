@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -538,6 +539,112 @@ func TestTokenSource_CancelCauseIsNotTransient(t *testing.T) {
 	require.False(t, IsTransient(err), "a cancel cause must not classify as transient")
 	require.ErrorIs(t, err, ErrTokenRequestFailed)
 	require.ErrorIs(t, err, cause, "the cancel cause should be preserved in the chain")
+}
+
+// TestTokenSource_RetriesOwnAttemptTimeout asserts that when an attempt hangs
+// past RetryConfig.Timeout, that timeout is transient and the next attempt
+// runs and succeeds.
+func TestTokenSource_RetriesOwnAttemptTimeout(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			// Hang the first attempt until the client gives up on it.
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test_access_token",
+			"token_type":   "DPoP",
+			"expires_in":   3600,
+		})
+	}))
+	// LIFO: unblock the handler before srv.Close() waits on it.
+	t.Cleanup(srv.Close)
+	defer close(release)
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(srv.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(srv.Client()),
+		WithRetryConfig(RetryConfig{
+			MaxAttempts:  2,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     time.Millisecond,
+			Timeout:      50 * time.Millisecond,
+		}),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.Equal(t, "test_access_token", token.AccessToken)
+	require.Equal(t, int32(2), calls.Load(), "the timed-out attempt must be retried")
+}
+
+// TestTokenSource_ParentDeadlineIsNotTransient asserts that when the caller's
+// own context deadline expires mid-request, the failure is not classified
+// transient. Only our per-attempt timeout is retryable. A single attempt is
+// used so the classification alone decides the outcome; with retries, the
+// backoff guard would also stop the loop.
+func TestTokenSource_ParentDeadlineIsNotTransient(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(srv.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithBaseContext(ctx),
+		WithHTTPClient(srv.Client()),
+		WithRetryConfig(RetryConfig{
+			MaxAttempts:  1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     time.Millisecond,
+			Timeout:      30 * time.Second,
+		}),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.False(t, IsTransient(err), "an expired parent deadline must not classify as transient")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, int32(1), calls.Load())
 }
 
 // TestIsTransient_Wrapping asserts classification survives additional
