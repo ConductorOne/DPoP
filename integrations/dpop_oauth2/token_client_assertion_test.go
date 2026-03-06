@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/conductorone/dpop/pkg/dpop"
 	"github.com/go-jose/go-jose/v4"
@@ -440,4 +442,266 @@ func TestTokenSource_ReplayPrevention(t *testing.T) {
 
 	// Verify server detected no replays
 	require.False(t, mas.replayDetected, "expected no replay detection")
+}
+
+func TestTokenSource_RetryOnServerError(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	pubJWK := &jose.JSONWebKey{
+		Key:       pub,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	// Track request count
+	var requestCount atomic.Int32
+
+	// Server that fails with 504 on first 2 requests, then succeeds
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requestCount.Add(1)
+		if count <= 2 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "test_access_token",
+			"token_type":   "DPoP",
+			"expires_in":   3600,
+		})
+	}))
+	defer server.Close()
+
+	_ = pubJWK
+
+	tokenURL, err := url.Parse(server.URL + "/token")
+	require.NoError(t, err)
+
+	store := NewNonceStore()
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK,
+		WithHTTPClient(server.Client()),
+		WithNonceStore(store),
+		WithMaxRetries(3),
+		WithTokenTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.Equal(t, "test_access_token", token.AccessToken)
+	require.True(t, requestCount.Load() >= 3, "expected at least 3 requests, got %d", requestCount.Load())
+}
+
+func TestTokenSource_RetryExhausted(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	var requestCount atomic.Int32
+
+	// Server that always returns 503
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tokenURL, err := url.Parse(server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK,
+		WithHTTPClient(server.Client()),
+		WithMaxRetries(1),
+		WithTokenTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.Contains(t, err.Error(), "retry attempts exhausted")
+	// 1 initial attempt + 1 retry = 2 total
+	require.Equal(t, int32(2), requestCount.Load(), "expected 2 requests (1 initial + 1 retry)")
+}
+
+func TestTokenSource_NoRetryOnAuthError(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	var requestCount atomic.Int32
+
+	// Server that returns 401 Unauthorized (not retryable)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_client",
+			"error_description": "Invalid client credentials",
+		})
+	}))
+	defer server.Close()
+
+	tokenURL, err := url.Parse(server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK,
+		WithHTTPClient(server.Client()),
+		WithMaxRetries(3),
+		WithTokenTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	// Auth error should not be retried - only 1 request
+	require.Equal(t, int32(1), requestCount.Load(), "expected only 1 request (no retries for auth errors)")
+}
+
+func TestTokenSource_NoRetryWhenDisabled(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	var requestCount atomic.Int32
+
+	// Server that always returns 502
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	tokenURL, err := url.Parse(server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK,
+		WithHTTPClient(server.Client()),
+		WithMaxRetries(0), // Disable retries
+		WithTokenTimeout(5*time.Second),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.Contains(t, err.Error(), "server error:")
+	require.Equal(t, int32(1), requestCount.Load(), "expected only 1 request when retries disabled")
+}
+
+func TestIsTransientError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil error", err: nil, expected: false},
+		{name: "context deadline", err: fmt.Errorf("context deadline exceeded"), expected: true},
+		{name: "connection refused", err: fmt.Errorf("connection refused"), expected: true},
+		{name: "connection reset", err: fmt.Errorf("connection reset by peer"), expected: true},
+		{name: "i/o timeout", err: fmt.Errorf("i/o timeout"), expected: true},
+		{name: "server error", err: fmt.Errorf("server error: 504 Gateway Timeout"), expected: true},
+		{name: "wrapped transient", err: fmt.Errorf("dpop_oauth2: token request failed: failed to execute request: context deadline exceeded"), expected: true},
+		{name: "auth error", err: fmt.Errorf("invalid_client - Invalid client credentials"), expected: false},
+		{name: "invalid token", err: fmt.Errorf("dpop_oauth2: invalid token response"), expected: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := isTransientError(tc.err)
+			require.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestWithTokenTimeout(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse("http://localhost:1/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK,
+		WithTokenTimeout(60*time.Second),
+		WithMaxRetries(0),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 60*time.Second, ts.tokenTimeout)
+	require.Equal(t, 0, ts.maxRetries)
+}
+
+func TestDefaultRetrySettings(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse("http://localhost:1/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(proofer, tokenURL, "test-client", privJWK)
+	require.NoError(t, err)
+	require.Equal(t, defaultTokenTimeout, ts.tokenTimeout)
+	require.Equal(t, defaultMaxRetries, ts.maxRetries)
 }
