@@ -323,7 +323,10 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool) (*oauth2.
 	}
 
 	if token.Expiry.IsZero() {
-		token.Expiry = time.Now().Add(time.Duration(token.ExpiresIn-10) * time.Second) // 10 seconds before the token expires
+		token.Expiry = time.Now()
+		if token.ExpiresIn > 0 {
+			token.Expiry = time.Now().Add(time.Duration(token.ExpiresIn-10) * time.Second) // 10 seconds before the token expires
+		}
 	}
 
 	// Accept both DPoP and Bearer tokens
