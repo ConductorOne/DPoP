@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/conductorone/dpop/pkg/dpop"
 	"github.com/go-jose/go-jose/v4"
@@ -24,6 +25,7 @@ type mockAuthServer struct {
 	nonce          string
 	enforceNonce   bool
 	tokenType      string
+	expiresIn      int
 	replayDetected bool
 	seenJTIs       map[string]bool
 	validator      *dpop.Validator
@@ -52,6 +54,7 @@ func newMockAuthServer(t *testing.T, jwk *jose.JSONWebKey) *mockAuthServer {
 		t:           t,
 		expectedJWK: jwk,
 		tokenType:   "DPoP",
+		expiresIn:   3600,
 		seenJTIs:    make(map[string]bool),
 		nonce:       "initial-nonce",
 	}
@@ -173,7 +176,7 @@ func (m *mockAuthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"access_token": "test_access_token",
 		"token_type":   m.tokenType,
-		"expires_in":   3600,
+		"expires_in":   m.expiresIn,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -301,6 +304,54 @@ func TestTokenSource_Token(t *testing.T) {
 			require.Equal(t, mas.tokenType, token.TokenType, "unexpected token type")
 		})
 	}
+}
+
+func TestTokenSource_TokenShortExpiry(t *testing.T) {
+	// Generate test keys
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	// Create JWKs for public and private keys
+	pubJWK := &jose.JSONWebKey{
+		Key:       pub,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	privJWK := &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	mas := newMockAuthServer(t, pubJWK)
+	defer mas.Close()
+	mas.expiresIn = 5
+	mas.setupValidator()
+
+	tokenURL, err := url.Parse(mas.server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(mas.server.Client()),
+		WithNonceStore(NewNonceStore()),
+	)
+	require.NoError(t, err)
+
+	beforeRequest := time.Now()
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.False(t, token.Expiry.Before(beforeRequest), "short token lifetime should not produce a past expiry")
 }
 
 func TestTokenSource_NonceRefresh(t *testing.T) {
