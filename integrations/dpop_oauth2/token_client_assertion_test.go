@@ -433,6 +433,204 @@ func TestTokenSource_NonceRefresh(t *testing.T) {
 	require.Equal(t, "DPoP", token.TokenType, "unexpected token type")
 }
 
+// nonceChallengeServer is a minimal OAuth2 token endpoint that, when
+// challenge is true, rejects the first proof lacking a nonce with a 400
+// use_dpop_nonce + DPoP-Nonce header and accepts any subsequent proof that
+// carries that nonce. It records every proof's nonce claim so a test can
+// assert the retry actually re-attached the challenged nonce.
+type nonceChallengeServer struct {
+	t          *testing.T
+	server     *httptest.Server
+	challenge  bool
+	nonce      string
+	calls      int
+	seenNonces []string
+}
+
+func newNonceChallengeServer(t *testing.T, challenge bool, nonce string) *nonceChallengeServer {
+	s := &nonceChallengeServer{t: t, challenge: challenge, nonce: nonce}
+	s.server = httptest.NewServer(http.HandlerFunc(s.handle))
+	return s
+}
+
+func (s *nonceChallengeServer) Close() { s.server.Close() }
+
+func (s *nonceChallengeServer) proofNonce(w http.ResponseWriter, dpopProof string) (string, bool) {
+	token, err := jose.ParseSigned(dpopProof, []jose.SignatureAlgorithm{jose.EdDSA})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_dpop_proof"})
+		return "", false
+	}
+	var claims struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(token.UnsafePayloadWithoutVerification(), &claims); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_dpop_proof"})
+		return "", false
+	}
+	return claims.Nonce, true
+}
+
+func (s *nonceChallengeServer) handle(w http.ResponseWriter, r *http.Request) {
+	s.calls++
+
+	dpopProof := r.Header.Get(dpop.HeaderName)
+	if dpopProof == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_dpop_proof", "error_description": "missing DPoP proof"})
+		return
+	}
+
+	nonce, ok := s.proofNonce(w, dpopProof)
+	if !ok {
+		return
+	}
+	s.seenNonces = append(s.seenNonces, nonce)
+
+	// Challenge the first proof that arrives without the required nonce.
+	if s.challenge && nonce != s.nonce {
+		w.Header().Set(dpop.NonceHeaderName, s.nonce)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":             "use_dpop_nonce",
+			"error_description": "nonce required",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": "test_access_token",
+		"token_type":   "DPoP",
+		"expires_in":   3600,
+	})
+}
+
+func newTestProoferKey(t *testing.T) *jose.JSONWebKey {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	return &jose.JSONWebKey{
+		Key:       priv,
+		KeyID:     "test-key",
+		Algorithm: string(jose.EdDSA),
+		Use:       "sig",
+	}
+}
+
+// TestTokenSource_SelfContainedNonceRetry asserts that a use_dpop_nonce
+// challenge is satisfied by an automatic retry even when the caller configured
+// NO NonceStore: the keystone behavior that makes any consumer nonce-aware on a
+// plain dependency bump with zero call-site changes.
+func TestTokenSource_SelfContainedNonceRetry(t *testing.T) {
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	const serverNonce = "challenge-nonce-xyz"
+	srv := newNonceChallengeServer(t, true, serverNonce)
+	defer srv.Close()
+
+	tokenURL, err := url.Parse(srv.server.URL + "/token")
+	require.NoError(t, err)
+
+	// Deliberately no WithNonceStore: a bare consumer.
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(srv.server.Client()),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.NoError(t, err, "retry should succeed without a configured NonceStore")
+	require.NotNil(t, token)
+	require.Equal(t, "test_access_token", token.AccessToken)
+
+	require.Equal(t, 2, srv.calls, "expected one challenge + one retry")
+	require.Len(t, srv.seenNonces, 2)
+	require.Empty(t, srv.seenNonces[0], "first proof should carry no nonce")
+	require.Equal(t, serverNonce, srv.seenNonces[1], "retried proof must carry the challenged nonce")
+}
+
+// TestTokenSource_NoStoreNoChallenge confirms a server that never challenges
+// still works for a bare consumer (single request, no retry, no store).
+func TestTokenSource_NoStoreNoChallenge(t *testing.T) {
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	srv := newNonceChallengeServer(t, false, "")
+	defer srv.Close()
+
+	tokenURL, err := url.Parse(srv.server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(srv.server.Client()),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.Equal(t, 1, srv.calls, "no challenge means no retry")
+}
+
+// TestTokenSource_ConfiguredStoreCachesNonce confirms the existing NonceStore
+// path still works: after a challenge-driven retry the nonce is cached, so a
+// second Token() call sends it up front and the server never has to challenge
+// again (no extra round trip).
+func TestTokenSource_ConfiguredStoreCachesNonce(t *testing.T) {
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	const serverNonce = "cached-nonce-123"
+	srv := newNonceChallengeServer(t, true, serverNonce)
+	defer srv.Close()
+
+	tokenURL, err := url.Parse(srv.server.URL + "/token")
+	require.NoError(t, err)
+
+	store := NewNonceStore()
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(srv.server.Client()),
+		WithNonceStore(store),
+	)
+	require.NoError(t, err)
+
+	// First call: challenge + retry => 2 server hits, nonce cached.
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.Equal(t, 2, srv.calls)
+	require.Equal(t, serverNonce, store.GetNonce(), "store should cache the challenged nonce")
+
+	// Second call: cached nonce is sent up front => single server hit.
+	token, err = ts.Token()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.Equal(t, 3, srv.calls, "cached nonce should avoid a second challenge round trip")
+	require.Equal(t, serverNonce, srv.seenNonces[len(srv.seenNonces)-1], "third proof should carry the cached nonce")
+}
+
 func TestTokenSource_ReplayPrevention(t *testing.T) {
 	// Generate test keys
 	pub, priv, err := ed25519.GenerateKey(nil)
