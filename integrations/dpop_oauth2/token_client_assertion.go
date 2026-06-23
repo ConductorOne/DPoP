@@ -179,10 +179,15 @@ type tokenSource struct {
 func (c *tokenSource) Token() (*oauth2.Token, error) {
 	ctx, done := context.WithTimeout(c.baseCtx, time.Second*30)
 	defer done()
-	return c.tryToken(ctx, true)
+	return c.tryToken(ctx, true, "")
 }
 
-func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool) (*oauth2.Token, error) {
+// tryToken performs a single token request. retryNonce, when non-empty, is the
+// nonce returned by a prior use_dpop_nonce challenge and is attached to this
+// attempt's proof regardless of whether a NonceStore is configured. This is
+// what makes a bare consumer (no NonceStore) nonce-aware: the challenge/retry
+// is self-contained within a single Token() call.
+func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonce string) (*oauth2.Token, error) {
 	jsigner, err := jose.NewSigner(
 		jose.SigningKey{
 			Algorithm: jose.EdDSA,
@@ -234,12 +239,15 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool) (*oauth2.
 	proofOpts := make([]dpop.ProofOption, 0, len(c.proofOptions)+2)
 	proofOpts = append(proofOpts, c.proofOptions...)
 
-	// Add nonce if available from store
-	if c.nonceStore != nil {
-		nonce := c.nonceStore.GetNonce()
-		if nonce != "" {
-			proofOpts = append(proofOpts, dpop.WithStaticNonce(nonce))
-		}
+	// Attach a nonce when available. Prefer the nonce from a use_dpop_nonce
+	// challenge on this same Token() call (retryNonce); otherwise fall back to
+	// a cached nonce from the configured store for cross-call reuse.
+	nonce := retryNonce
+	if nonce == "" && c.nonceStore != nil {
+		nonce = c.nonceStore.GetNonce()
+	}
+	if nonce != "" {
+		proofOpts = append(proofOpts, dpop.WithStaticNonce(nonce))
 	}
 
 	dpopProof, err := c.proofer.CreateProof(ctx, method, c.tokenURL.String(), proofOpts...)
@@ -292,7 +300,7 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool) (*oauth2.
 				return nil, ErrNonceMissing
 			}
 
-			// Store the nonce if we have a store
+			// Store the nonce for cross-call reuse if we have a store
 			if c.nonceStore != nil {
 				c.nonceStore.SetNonce(nonce)
 			}
@@ -302,8 +310,9 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool) (*oauth2.
 				return nil, fmt.Errorf("%w: token request failed after retry: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
 			}
 
-			// Try again with the new nonce
-			return c.tryToken(ctx, false)
+			// Retry with the challenged nonce. Passing it explicitly means the
+			// retry is nonce-aware even with no NonceStore configured.
+			return c.tryToken(ctx, false, nonce)
 		}
 		return nil, fmt.Errorf("%w: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
 	}
