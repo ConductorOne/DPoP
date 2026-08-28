@@ -4,6 +4,7 @@ go 1.23.4
 
 require (
 	github.com/conductorone/dpop v0.0.2
+	github.com/conductorone/dpop/integrations/dpop_oauth2 v0.2.5
 	github.com/go-jose/go-jose/v4 v4.0.4
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/oauth2 v0.26.0
@@ -26,3 +27,5 @@ require (
 )
 
 replace github.com/conductorone/dpop => ../..
+
+replace github.com/conductorone/dpop/integrations/dpop_oauth2 => ../dpop_oauth2

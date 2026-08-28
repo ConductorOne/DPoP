@@ -30,6 +30,14 @@ var (
 	// ErrTokenRequestFailed indicates the token request failed
 	ErrTokenRequestFailed = errors.New("dpop_oauth2: token request failed")
 
+	// ErrTokenRequestTransient classifies a token request failure as likely
+	// transient: a 5xx or 429 response, a transport-level error, or a
+	// timeout. Errors matching this sentinel always also match
+	// ErrTokenRequestFailed; definitive OAuth protocol rejections (e.g.
+	// invalid_client) match only ErrTokenRequestFailed. Use IsTransient to
+	// test for it.
+	ErrTokenRequestTransient = errors.New("dpop_oauth2: transient token request failure")
+
 	// ErrProofCreationFailed indicates failure to create or sign DPoP proof
 	ErrProofCreationFailed = errors.New("dpop_oauth2: failed to create or sign DPoP proof")
 )
@@ -88,6 +96,7 @@ type tokenSourceOptions struct {
 	proofOptions   []dpop.ProofOption
 	nonceStore     *NonceStore
 	requestOptions []TokenRequestOption
+	retry          RetryConfig
 }
 
 // WithBaseContext sets a custom base context for the token source
@@ -125,6 +134,15 @@ func WithRequestOption(opt TokenRequestOption) TokenSourceOption {
 	}
 }
 
+// WithRetryConfig overrides how transient token request failures are retried.
+// See RetryConfig for field semantics; set MaxAttempts to 1 to disable
+// retries entirely.
+func WithRetryConfig(cfg RetryConfig) TokenSourceOption {
+	return func(opts *tokenSourceOptions) {
+		opts.retry = cfg
+	}
+}
+
 func NewTokenSource(proofer *dpop.Proofer, tokenURL *url.URL, clientID string, clientSecret *jose.JSONWebKey, opts ...TokenSourceOption) (*tokenSource, error) {
 	if proofer == nil {
 		return nil, fmt.Errorf("%w: dpop-proofer", ErrMissingRequiredField)
@@ -145,6 +163,7 @@ func NewTokenSource(proofer *dpop.Proofer, tokenURL *url.URL, clientID string, c
 	options := &tokenSourceOptions{
 		baseCtx:    context.Background(),
 		httpClient: http.DefaultClient,
+		retry:      DefaultRetryConfig(),
 	}
 
 	for _, opt := range opts {
@@ -161,6 +180,7 @@ func NewTokenSource(proofer *dpop.Proofer, tokenURL *url.URL, clientID string, c
 		requestOptions: options.requestOptions,
 		proofOptions:   options.proofOptions,
 		nonceStore:     options.nonceStore,
+		retry:          options.retry.normalized(),
 	}, nil
 }
 
@@ -174,12 +194,39 @@ type tokenSource struct {
 	requestOptions []TokenRequestOption
 	proofOptions   []dpop.ProofOption
 	nonceStore     *NonceStore
+	retry          RetryConfig
 }
 
 func (c *tokenSource) Token() (*oauth2.Token, error) {
 	ctx, done := context.WithTimeout(c.baseCtx, time.Second*30)
 	defer done()
-	return c.tryToken(ctx, true, "")
+
+	// Transient failures (5xx/429, transport errors, timeouts) are retried
+	// with capped exponential backoff + jitter. The retry re-enters tryToken,
+	// so every attempt signs a fresh DPoP proof and client assertion — a
+	// proof's jti may be single-use, so an identical request is never
+	// replayed. Definitive failures (OAuth protocol rejections) return
+	// immediately.
+	var lastErr error
+	for attempt := 0; attempt < c.retry.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			if !sleepBeforeRetry(ctx, c.retry, attempt) {
+				// Token() budget exhausted mid-backoff; surface the last
+				// transient failure so callers can still classify it.
+				break
+			}
+		}
+
+		token, err := c.tryToken(ctx, true, "")
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+		if !IsTransient(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 // tryToken performs a single token request. retryNonce, when non-empty, is the
@@ -279,7 +326,10 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to execute request: %v", ErrTokenRequestFailed, err)
+		// Transport-level failures (connection resets, proxy errors,
+		// timeouts) never reached the authorization server's OAuth logic, so
+		// they are always safe to classify as transient.
+		return nil, markTransient(fmt.Errorf("%w: failed to execute request: %v", ErrTokenRequestFailed, err))
 	}
 	defer resp.Body.Close()
 
@@ -315,6 +365,10 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 			return c.tryToken(ctx, false, nonce)
 		}
 		return nil, fmt.Errorf("%w: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
+	}
+
+	if isRetryableStatus(resp.StatusCode) {
+		return nil, markTransient(fmt.Errorf("%w: unexpected status code: %s", ErrTokenRequestFailed, resp.Status))
 	}
 
 	if resp.StatusCode != http.StatusOK {
