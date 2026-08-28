@@ -216,8 +216,14 @@ func (c *tokenSource) Token() (*oauth2.Token, error) {
 	for attempt := 0; attempt < c.retry.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			if !sleepBeforeRetry(ctx, c.retry, attempt) {
-				// Token() budget exhausted mid-backoff; surface the last
-				// transient failure so callers can still classify it.
+				// The context died mid-backoff. A deadline expiry (the 30s
+				// Token() budget) is a timeout: surface the last transient
+				// failure so callers can still classify it. A caller cancel
+				// is not a timeout — strip the transient classification so
+				// nothing retries abandoned work.
+				if errors.Is(ctx.Err(), context.Canceled) {
+					return nil, fmt.Errorf("%w: %w during retry backoff (last error: %v)", ErrTokenRequestFailed, ctx.Err(), lastErr)
+				}
 				break
 			}
 		}
@@ -347,8 +353,11 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 		// the underlying cause (context.Canceled, net errors, ...).
 		reqErr := fmt.Errorf("%w: failed to execute request: %w", ErrTokenRequestFailed, err)
 		// A canceled context means the caller abandoned the call — that is
-		// not a transport failure, so don't classify it as retryable.
-		if errors.Is(err, context.Canceled) {
+		// not a transport failure, so don't classify it as retryable. Check
+		// the context as well as the returned error: when the context was
+		// canceled via context.WithCancelCause, Do returns the cause, which
+		// need not match context.Canceled.
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			return nil, nonce, reqErr
 		}
 		// Everything else that fails before an HTTP response (connection

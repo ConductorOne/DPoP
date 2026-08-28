@@ -452,6 +452,94 @@ func TestTokenSource_CanceledContextIsNotTransient(t *testing.T) {
 	require.Equal(t, 0, srv.callCount(), "no request should reach the server on a canceled context")
 }
 
+// TestTokenSource_CancelDuringBackoffIsNotTransient asserts that a caller
+// cancel landing mid-backoff strips the transient classification instead of
+// surfacing the previous attempt's transient error.
+func TestTokenSource_CancelDuringBackoffIsNotTransient(t *testing.T) {
+	srv := newScriptedTokenServer(t, []int{http.StatusServiceUnavailable})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(srv.server.URL + "/token")
+	require.NoError(t, err)
+
+	// A very long backoff guarantees the cancel below lands during
+	// sleepBeforeRetry, not during an HTTP attempt.
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithBaseContext(ctx),
+		WithHTTPClient(srv.server.Client()),
+		WithRetryConfig(RetryConfig{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: time.Minute}),
+	)
+	require.NoError(t, err)
+
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.False(t, IsTransient(err), "a cancel during backoff must not surface as transient")
+	require.ErrorIs(t, err, ErrTokenRequestFailed)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, srv.callCount(), "cancel during backoff must stop further attempts")
+}
+
+// TestTokenSource_CancelCauseIsNotTransient asserts that cancellation via
+// context.WithCancelCause on an in-flight request is not classified
+// transient, even though http.Client.Do surfaces the cause instead of
+// context.Canceled.
+func TestTokenSource_CancelCauseIsNotTransient(t *testing.T) {
+	done := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	// LIFO: unblock the handler before slow.Close() waits on it.
+	defer close(done)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(slow.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithBaseContext(ctx),
+		WithHTTPClient(slow.Client()),
+		WithRetryConfig(fastRetry()),
+	)
+	require.NoError(t, err)
+
+	cause := errors.New("caller abandoned the sync")
+	time.AfterFunc(100*time.Millisecond, func() { cancel(cause) })
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.False(t, IsTransient(err), "a cancel cause must not classify as transient")
+	require.ErrorIs(t, err, ErrTokenRequestFailed)
+	require.ErrorIs(t, err, cause, "the cancel cause should be preserved in the chain")
+}
+
 // TestIsTransient_Wrapping asserts classification survives additional
 // wrapping by callers.
 func TestIsTransient_Wrapping(t *testing.T) {
