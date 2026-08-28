@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 
 	"github.com/conductorone/dpop/pkg/dpop"
@@ -203,11 +204,15 @@ func (c *tokenSource) Token() (*oauth2.Token, error) {
 
 	// Transient failures (5xx/429, transport errors, timeouts) are retried
 	// with capped exponential backoff + jitter. The retry re-enters tryToken,
-	// so every attempt signs a fresh DPoP proof and client assertion — a
-	// proof's jti may be single-use, so an identical request is never
-	// replayed. Definitive failures (OAuth protocol rejections) return
-	// immediately.
+	// so every attempt signs a fresh DPoP proof and client assertion — both
+	// carry unique jtis, so an identical request is never replayed.
+	// Definitive failures (OAuth protocol rejections) return immediately.
+	//
+	// A nonce learned from a use_dpop_nonce challenge is carried across
+	// attempts so a bare consumer (no NonceStore) isn't re-challenged on
+	// every retry.
 	var lastErr error
+	retryNonce := ""
 	for attempt := 0; attempt < c.retry.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			if !sleepBeforeRetry(ctx, c.retry, attempt) {
@@ -217,9 +222,12 @@ func (c *tokenSource) Token() (*oauth2.Token, error) {
 			}
 		}
 
-		token, err := c.tryToken(ctx, true, "")
+		token, nonce, err := c.tryToken(ctx, true, retryNonce)
 		if err == nil {
 			return token, nil
+		}
+		if nonce != "" {
+			retryNonce = nonce
 		}
 		lastErr = err
 		if !IsTransient(err) {
@@ -234,7 +242,11 @@ func (c *tokenSource) Token() (*oauth2.Token, error) {
 // attempt's proof regardless of whether a NonceStore is configured. This is
 // what makes a bare consumer (no NonceStore) nonce-aware: the challenge/retry
 // is self-contained within a single Token() call.
-func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonce string) (*oauth2.Token, error) {
+//
+// The second return value is the nonce in effect for this attempt (the
+// carried retryNonce, a cached store nonce, or a newly challenged one), so
+// the transient retry loop in Token() can carry it into the next attempt.
+func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonce string) (*oauth2.Token, string, error) {
 	jsigner, err := jose.NewSigner(
 		jose.SigningKey{
 			Algorithm: jose.EdDSA,
@@ -242,7 +254,7 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 		},
 		nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to create signer: %v", ErrProofCreationFailed, err)
+		return nil, retryNonce, fmt.Errorf("%w: failed to create signer: %v", ErrProofCreationFailed, err)
 	}
 
 	// Our token host may include a port, but the audience never expects a port
@@ -250,6 +262,11 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 	now := time.Now()
 
 	claims := &jwt.Claims{
+		// A unique jti makes every signed assertion distinct. Without it,
+		// second-precision timestamps plus deterministic Ed25519 signatures
+		// would make fast retries re-send a byte-identical assertion, which a
+		// server enforcing RFC 7523 single-use may reject.
+		ID:        uuid.New().String(),
 		Issuer:    c.clientID,
 		Subject:   c.clientID,
 		Audience:  jwt.Audience{aud},
@@ -272,13 +289,13 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 	for _, opt := range c.requestOptions {
 		err = opt(tr)
 		if err != nil {
-			return nil, fmt.Errorf("%w: failed to modify request: %v", ErrTokenRequestFailed, err)
+			return nil, retryNonce, fmt.Errorf("%w: failed to modify request: %v", ErrTokenRequestFailed, err)
 		}
 	}
 
 	marshalledClaims, err := tr.Marshaler(claims)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to marshal claims: %v", ErrTokenRequestFailed, err)
+		return nil, retryNonce, fmt.Errorf("%w: failed to marshal claims: %v", ErrTokenRequestFailed, err)
 	}
 
 	method := http.MethodPost
@@ -299,24 +316,24 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 
 	dpopProof, err := c.proofer.CreateProof(ctx, method, c.tokenURL.String(), proofOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to create proof: %v", ErrProofCreationFailed, err)
+		return nil, nonce, fmt.Errorf("%w: failed to create proof: %v", ErrProofCreationFailed, err)
 	}
 
 	rv, err := jsigner.Sign(marshalledClaims)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to sign proof: %v", ErrProofCreationFailed, err)
+		return nil, nonce, fmt.Errorf("%w: failed to sign proof: %v", ErrProofCreationFailed, err)
 	}
 
 	s, err := rv.CompactSerialize()
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to serialize proof: %v", ErrProofCreationFailed, err)
+		return nil, nonce, fmt.Errorf("%w: failed to serialize proof: %v", ErrProofCreationFailed, err)
 	}
 
 	tr.Body["client_assertion"] = []string{s}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.tokenURL.String(), strings.NewReader(tr.Body.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to create request: %v", ErrTokenRequestFailed, err)
+		return nil, nonce, fmt.Errorf("%w: failed to create request: %v", ErrTokenRequestFailed, err)
 	}
 
 	req.Header.Set(dpop.HeaderName, dpopProof)
@@ -326,10 +343,20 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Transport-level failures (connection resets, proxy errors,
-		// timeouts) never reached the authorization server's OAuth logic, so
-		// they are always safe to classify as transient.
-		return nil, markTransient(fmt.Errorf("%w: failed to execute request: %v", ErrTokenRequestFailed, err))
+		// The transport error stays in the chain (%w) so callers can inspect
+		// the underlying cause (context.Canceled, net errors, ...).
+		reqErr := fmt.Errorf("%w: failed to execute request: %w", ErrTokenRequestFailed, err)
+		// A canceled context means the caller abandoned the call — that is
+		// not a transport failure, so don't classify it as retryable.
+		if errors.Is(err, context.Canceled) {
+			return nil, nonce, reqErr
+		}
+		// Everything else that fails before an HTTP response (connection
+		// resets, proxy errors, timeouts — including a deadline expiry, which
+		// is exactly the timed-out token POST class) never reached the
+		// authorization server's OAuth logic: it carries no verdict about the
+		// credential, so it is safe to classify as retryable.
+		return nil, nonce, markTransient(reqErr)
 	}
 	defer resp.Body.Close()
 
@@ -340,49 +367,49 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 			ErrorDescription string `json:"error_description"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
-			return nil, fmt.Errorf("%w: failed to decode error response: %v", ErrTokenRequestFailed, err)
+			return nil, nonce, fmt.Errorf("%w: failed to decode error response: %v", ErrTokenRequestFailed, err)
 		}
 
 		if errorResp.Error == "use_dpop_nonce" {
 			// Get the new nonce from header
-			nonce := resp.Header.Get(dpop.NonceHeaderName)
-			if nonce == "" {
-				return nil, ErrNonceMissing
+			challengeNonce := resp.Header.Get(dpop.NonceHeaderName)
+			if challengeNonce == "" {
+				return nil, nonce, ErrNonceMissing
 			}
 
 			// Store the nonce for cross-call reuse if we have a store
 			if c.nonceStore != nil {
-				c.nonceStore.SetNonce(nonce)
+				c.nonceStore.SetNonce(challengeNonce)
 			}
 
 			// Only retry once on first attempt
 			if !firstAttempt {
-				return nil, fmt.Errorf("%w: token request failed after retry: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
+				return nil, challengeNonce, fmt.Errorf("%w: token request failed after retry: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
 			}
 
 			// Retry with the challenged nonce. Passing it explicitly means the
 			// retry is nonce-aware even with no NonceStore configured.
-			return c.tryToken(ctx, false, nonce)
+			return c.tryToken(ctx, false, challengeNonce)
 		}
-		return nil, fmt.Errorf("%w: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
+		return nil, nonce, fmt.Errorf("%w: %s - %s", ErrTokenRequestFailed, errorResp.Error, errorResp.ErrorDescription)
 	}
 
 	if isRetryableStatus(resp.StatusCode) {
-		return nil, markTransient(fmt.Errorf("%w: unexpected status code: %s", ErrTokenRequestFailed, resp.Status))
+		return nil, nonce, markTransient(fmt.Errorf("%w: unexpected status code: %s", ErrTokenRequestFailed, resp.Status))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: unexpected status code: %s", ErrTokenRequestFailed, resp.Status)
+		return nil, nonce, fmt.Errorf("%w: unexpected status code: %s", ErrTokenRequestFailed, resp.Status)
 	}
 
 	token := &oauth2.Token{}
 	err = json.NewDecoder(resp.Body).Decode(token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to decode token response: %v", ErrInvalidToken, err)
+		return nil, nonce, fmt.Errorf("%w: failed to decode token response: %v", ErrInvalidToken, err)
 	}
 
 	if token.AccessToken == "" {
-		return nil, fmt.Errorf("%w: empty access token", ErrInvalidToken)
+		return nil, nonce, fmt.Errorf("%w: empty access token", ErrInvalidToken)
 	}
 
 	if token.Expiry.IsZero() {
@@ -399,8 +426,8 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 	// Accept both DPoP and Bearer tokens
 	// If we sent a DPoP proof but got a Bearer token, that means the AS doesn't support DPoP
 	if !strings.EqualFold(token.TokenType, "DPoP") && !strings.EqualFold(token.TokenType, "Bearer") {
-		return nil, fmt.Errorf("%w: invalid token type: %s", ErrInvalidToken, token.TokenType)
+		return nil, nonce, fmt.Errorf("%w: invalid token type: %s", ErrInvalidToken, token.TokenType)
 	}
 
-	return token, nil
+	return token, nonce, nil
 }

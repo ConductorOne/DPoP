@@ -1,6 +1,7 @@
 package dpop_oauth2
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -31,12 +32,13 @@ func fastRetry() RetryConfig {
 // DPoP proof jti is recorded so tests can assert each attempt signed a fresh
 // proof.
 type scriptedTokenServer struct {
-	t         *testing.T
-	server    *httptest.Server
-	mu        sync.Mutex
-	script    []int
-	calls     int
-	proofJTIs []string
+	t          *testing.T
+	server     *httptest.Server
+	mu         sync.Mutex
+	script     []int
+	calls      int
+	proofJTIs  []string
+	assertions []string
 }
 
 func newScriptedTokenServer(t *testing.T, script []int) *scriptedTokenServer {
@@ -66,6 +68,8 @@ func (s *scriptedTokenServer) handle(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 
 	s.recordProof(r)
+	require.NoError(s.t, r.ParseForm())
+	s.assertions = append(s.assertions, r.PostFormValue("client_assertion"))
 
 	idx := s.calls
 	if idx >= len(s.script) {
@@ -106,6 +110,12 @@ func (s *scriptedTokenServer) seenProofJTIs() []string {
 	return append([]string(nil), s.proofJTIs...)
 }
 
+func (s *scriptedTokenServer) seenAssertions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.assertions...)
+}
+
 func newScriptedTokenSource(t *testing.T, srv *scriptedTokenServer, opts ...TokenSourceOption) *tokenSource {
 	t.Helper()
 	privJWK := newTestProoferKey(t)
@@ -127,7 +137,8 @@ func newScriptedTokenSource(t *testing.T, srv *scriptedTokenServer, opts ...Toke
 
 // TestTokenSource_RetriesTransient5xx asserts that 5xx responses are retried
 // until success and that every attempt carries a freshly signed DPoP proof
-// (distinct jti) — an identical request is never replayed.
+// and client assertion (distinct jtis) — an identical request is never
+// replayed, even when retries land within the same second.
 func TestTokenSource_RetriesTransient5xx(t *testing.T) {
 	srv := newScriptedTokenServer(t, []int{http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusOK})
 	ts := newScriptedTokenSource(t, srv)
@@ -139,11 +150,20 @@ func TestTokenSource_RetriesTransient5xx(t *testing.T) {
 
 	jtis := srv.seenProofJTIs()
 	require.Len(t, jtis, 3)
-	seen := make(map[string]bool, len(jtis))
+	seenJTIs := make(map[string]bool, len(jtis))
 	for _, jti := range jtis {
 		require.NotEmpty(t, jti, "every attempt must carry a DPoP proof")
-		require.False(t, seen[jti], "each attempt must sign a fresh proof (jti %q reused)", jti)
-		seen[jti] = true
+		require.False(t, seenJTIs[jti], "each attempt must sign a fresh proof (jti %q reused)", jti)
+		seenJTIs[jti] = true
+	}
+
+	assertions := srv.seenAssertions()
+	require.Len(t, assertions, 3)
+	seenAssertions := make(map[string]bool, len(assertions))
+	for _, assertion := range assertions {
+		require.NotEmpty(t, assertion, "every attempt must carry a client assertion")
+		require.False(t, seenAssertions[assertion], "each attempt must sign a fresh client assertion")
+		seenAssertions[assertion] = true
 	}
 }
 
@@ -321,6 +341,115 @@ func TestTokenSource_NonceChallengeThenTransientRetry(t *testing.T) {
 	// Call 1: challenged. Call 2 (nonce retry): 503. Call 3 (transient retry,
 	// cached nonce sent up front): success.
 	require.Equal(t, 3, calls)
+}
+
+// TestTokenSource_NonceCarriedAcrossRetries asserts that a bare consumer (no
+// NonceStore) does not get re-challenged on every transient retry: the nonce
+// learned from the first use_dpop_nonce challenge is carried into subsequent
+// outer attempts.
+func TestTokenSource_NonceCarriedAcrossRetries(t *testing.T) {
+	const serverNonce = "carried-nonce"
+
+	var mu sync.Mutex
+	calls := 0
+	var seenNonces []string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+
+		proof := r.Header.Get(dpop.HeaderName)
+		token, err := jose.ParseSigned(proof, []jose.SignatureAlgorithm{jose.EdDSA})
+		require.NoError(t, err)
+		var claims struct {
+			Nonce string `json:"nonce"`
+		}
+		require.NoError(t, json.Unmarshal(token.UnsafePayloadWithoutVerification(), &claims))
+		seenNonces = append(seenNonces, claims.Nonce)
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case claims.Nonce != serverNonce:
+			w.Header().Set(dpop.NonceHeaderName, serverNonce)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "use_dpop_nonce"})
+		case calls == 2:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unavailable"})
+		default:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "test_access_token",
+				"token_type":   "DPoP",
+				"expires_in":   3600,
+			})
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(handler))
+	defer srv.Close()
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(srv.URL + "/token")
+	require.NoError(t, err)
+
+	// Deliberately no NonceStore.
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithHTTPClient(srv.Client()),
+		WithRetryConfig(fastRetry()),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.NoError(t, err)
+	require.Equal(t, "test_access_token", token.AccessToken)
+	// Call 1: challenged. Call 2 (inner nonce retry): 503. Call 3 (outer
+	// transient retry): carries the learned nonce up front, so the server
+	// does not challenge again.
+	require.Equal(t, 3, calls, "the outer retry must not trigger a second challenge round trip")
+	require.Equal(t, []string{"", serverNonce, serverNonce}, seenNonces)
+}
+
+// TestTokenSource_CanceledContextIsNotTransient asserts that a caller
+// abandoning the call (context cancellation) is not classified as a retryable
+// transport failure.
+func TestTokenSource_CanceledContextIsNotTransient(t *testing.T) {
+	srv := newScriptedTokenServer(t, []int{http.StatusOK})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	privJWK := newTestProoferKey(t)
+	proofer, err := dpop.NewProofer(privJWK)
+	require.NoError(t, err)
+
+	tokenURL, err := url.Parse(srv.server.URL + "/token")
+	require.NoError(t, err)
+
+	ts, err := NewTokenSource(
+		proofer,
+		tokenURL,
+		"test-client",
+		privJWK,
+		WithBaseContext(ctx),
+		WithHTTPClient(srv.server.Client()),
+		WithRetryConfig(fastRetry()),
+	)
+	require.NoError(t, err)
+
+	token, err := ts.Token()
+	require.Error(t, err)
+	require.Nil(t, token)
+	require.False(t, IsTransient(err), "cancellation is not a transport failure and must not classify as transient")
+	require.ErrorIs(t, err, ErrTokenRequestFailed)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, srv.callCount(), "no request should reach the server on a canceled context")
 }
 
 // TestIsTransient_Wrapping asserts classification survives additional
