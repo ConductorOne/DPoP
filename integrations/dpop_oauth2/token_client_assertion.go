@@ -222,7 +222,9 @@ func (c *tokenSource) Token() (*oauth2.Token, error) {
 				// is not a timeout — strip the transient classification so
 				// nothing retries abandoned work.
 				if errors.Is(ctx.Err(), context.Canceled) {
-					return nil, fmt.Errorf("%w: %w during retry backoff (last error: %v)", ErrTokenRequestFailed, ctx.Err(), lastErr)
+					// context.Cause preserves a WithCancelCause cause in the
+					// chain; for a plain cancel it is context.Canceled.
+					return nil, fmt.Errorf("%w: %w during retry backoff (last error: %v)", ErrTokenRequestFailed, context.Cause(ctx), lastErr)
 				}
 				break
 			}

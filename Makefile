@@ -88,8 +88,8 @@ tag:
 		echo "❌ ERROR: No tag supplied. Usage: make tag TAG=<version>"; \
 		exit 1; \
 	fi
-	@if ! grep -q "github.com/conductorone/dpop/integrations/dpop_oauth2 $(TAG)$$" integrations/dpop_grpc/go.mod; then \
-		echo "❌ ERROR: integrations/dpop_grpc/go.mod must require dpop_oauth2 $(TAG) before tagging."; \
+	@if ! git show HEAD:integrations/dpop_grpc/go.mod | awk -v tag="$(TAG)" '$$1 == "github.com/conductorone/dpop/integrations/dpop_oauth2" && $$2 == tag { found = 1 } END { exit !found }'; then \
+		echo "❌ ERROR: integrations/dpop_grpc/go.mod at HEAD must require dpop_oauth2 $(TAG) before tagging."; \
 		echo "   The local replace directive is ignored by consumers; a published dpop_grpc"; \
 		echo "   pinned to an older dpop_oauth2 will not compile. Bump the require, commit, re-tag."; \
 		exit 1; \
