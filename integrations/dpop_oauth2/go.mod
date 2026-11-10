@@ -3,7 +3,7 @@ module github.com/conductorone/dpop/integrations/dpop_oauth2
 go 1.26.0
 
 require (
-	github.com/conductorone/dpop v0.3.0
+	github.com/conductorone/dpop v0.4.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
