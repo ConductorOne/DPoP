@@ -3,7 +3,7 @@ module github.com/conductorone/dpop/integrations/dpop_gin
 go 1.26.10
 
 require (
-	github.com/conductorone/dpop v0.3.0
+	github.com/conductorone/dpop v0.4.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/stretchr/testify v1.12.1

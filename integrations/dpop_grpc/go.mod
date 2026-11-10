@@ -3,7 +3,7 @@ module github.com/conductorone/dpop/integrations/dpop_grpc
 go 1.26.0
 
 require (
-	github.com/conductorone/dpop v0.3.0
+	github.com/conductorone/dpop v0.4.0
 	// RELEASE NOTE: this module uses dpop_oauth2 APIs newer than v0.2.5
 	// (IsTransient, ErrTokenRequestTransient). The replace directive below
 	// covers local builds only — consumers ignore it. When tagging a release
