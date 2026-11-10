@@ -9,7 +9,7 @@ require (
 	// covers local builds only — consumers ignore it. When tagging a release
 	// (make tag tags every module together), bump this require to that same
 	// new tag or published dpop_grpc will not compile.
-	github.com/conductorone/dpop/integrations/dpop_oauth2 v0.3.0
+	github.com/conductorone/dpop/integrations/dpop_oauth2 v0.4.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/oauth2 v0.38.0
