@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	pb "github.com/conductorone/dpop/integrations/dpop_grpc/testdata"
 	"github.com/conductorone/dpop/integrations/dpop_oauth2"
@@ -24,6 +26,14 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
+type credentialTestServer struct {
+	pb.UnimplementedTestServiceServer
+}
+
+func (s *credentialTestServer) TestUnary(ctx context.Context, req *pb.TestRequest) (*pb.TestResponse, error) {
+	return &pb.TestResponse{Message: req.Message}, nil
+}
+
 // newCredentialTestClient wires a DPoPCredentials backed by the given token
 // source to a bufconn-hosted test service and returns a client for it.
 func newCredentialTestClient(t *testing.T, tokenSource oauth2.TokenSource) pb.TestServiceClient {
@@ -32,7 +42,7 @@ func newCredentialTestClient(t *testing.T, tokenSource oauth2.TokenSource) pb.Te
 	lis := bufconn.Listen(bufSize)
 
 	s := grpc.NewServer()
-	pb.RegisterTestServiceServer(s, &testServer{})
+	pb.RegisterTestServiceServer(s, &credentialTestServer{})
 	go func() {
 		_ = s.Serve(lis)
 	}()
@@ -149,4 +159,89 @@ func TestDPoPCredentials_EndToEndTransient503(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, codes.Unavailable, st.Code(), "a 503 from the token endpoint must surface as Unavailable")
 	require.Contains(t, st.Message(), "503")
+}
+
+func TestDPoPCredentials_TokenBudgetRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		cancelParent bool
+	}{
+		{name: "own_budget"},
+		{name: "caller_cancel", cancelParent: true},
+		{name: "token_body", status: http.StatusOK},
+		{name: "error_body", status: http.StatusBadRequest},
+		{name: "caller_cancel_token_body", status: http.StatusOK, cancelParent: true},
+		{name: "caller_cancel_error_body", status: http.StatusBadRequest, cancelParent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var calls atomic.Int32
+			release := make(chan struct{})
+			tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == 1 {
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+						w.(http.Flusher).Flush()
+					}
+					if tc.cancelParent {
+						cancel()
+					}
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"access_token":"test_access_token","token_type":"DPoP","expires_in":3600}`)
+			}))
+			defer tokenSrv.Close()
+			defer close(release)
+
+			_, priv, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			key := &jose.JSONWebKey{Key: priv, KeyID: "test-key", Algorithm: string(jose.EdDSA), Use: "sig"}
+			proofer, err := dpop.NewProofer(key)
+			require.NoError(t, err)
+			tokenURL, err := url.Parse(tokenSrv.URL + "/token")
+			require.NoError(t, err)
+			cfg := dpop_oauth2.RetryConfig{
+				MaxAttempts:  3,
+				InitialDelay: time.Millisecond,
+				MaxDelay:     time.Millisecond,
+				Timeout:      time.Minute,
+			}
+			if tc.status != 0 && !tc.cancelParent {
+				cfg.MaxAttempts = 1
+				cfg.Timeout = time.Second
+			}
+			ts, err := dpop_oauth2.NewTokenSource(proofer, tokenURL, "test-client", key,
+				dpop_oauth2.WithBaseContext(ctx),
+				dpop_oauth2.WithHTTPClient(tokenSrv.Client()),
+				dpop_oauth2.WithRetryConfig(cfg),
+			)
+			require.NoError(t, err)
+			client := newCredentialTestClient(t, ts)
+
+			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer rpcCancel()
+			_, err = client.TestUnary(rpcCtx, &pb.TestRequest{Message: "test"})
+			require.Equal(t, int32(1), calls.Load(), "the expired call must stop its internal retries")
+			if tc.cancelParent {
+				require.Equal(t, codes.Unauthenticated, status.Code(err), "caller cancellation must not trigger an outer retry")
+				return
+			}
+
+			require.Equal(t, codes.Unavailable, status.Code(err), "an owned-budget timeout must allow an outer retry")
+			if tc.status != 0 {
+				require.Contains(t, err.Error(), "failed to decode", "the timeout must occur after headers were returned")
+			}
+			response, err := client.TestUnary(rpcCtx, &pb.TestRequest{Message: "retry"})
+			require.NoError(t, err)
+			require.Equal(t, "retry", response.Message)
+			require.Equal(t, int32(2), calls.Load(), "the outer retry must acquire a token with a fresh budget")
+		})
+	}
 }

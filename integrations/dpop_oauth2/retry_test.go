@@ -597,9 +597,9 @@ func TestTokenSource_RetriesOwnAttemptTimeout(t *testing.T) {
 
 // TestTokenSource_ParentDeadlineIsNotTransient asserts that when the caller's
 // own context deadline expires mid-request, the failure is not classified
-// transient. Only our per-attempt timeout is retryable. A single attempt is
-// used so the classification alone decides the outcome; with retries, the
-// backoff guard would also stop the loop.
+// transient. Caller deadlines must not be mistaken for our own token budget.
+// A single attempt is used so the classification alone decides the outcome;
+// with retries, the backoff guard would also stop the loop.
 func TestTokenSource_ParentDeadlineIsNotTransient(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})
