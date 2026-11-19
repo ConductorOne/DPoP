@@ -162,19 +162,30 @@ func TestDPoPCredentials_EndToEndTransient503(t *testing.T) {
 }
 
 func TestDPoPCredentials_TokenBudgetRetry(t *testing.T) {
-	for _, cancelParent := range []bool{false, true} {
-		name := "own_budget"
-		if cancelParent {
-			name = "caller_cancel"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		cancelParent bool
+	}{
+		{name: "own_budget"},
+		{name: "caller_cancel", cancelParent: true},
+		{name: "token_body", status: http.StatusOK},
+		{name: "error_body", status: http.StatusBadRequest},
+		{name: "caller_cancel_token_body", status: http.StatusOK, cancelParent: true},
+		{name: "caller_cancel_error_body", status: http.StatusBadRequest, cancelParent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var calls atomic.Int32
 			release := make(chan struct{})
 			tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if calls.Add(1) == 1 {
-					if cancelParent {
+					if tc.status != 0 {
+						w.WriteHeader(tc.status)
+						w.(http.Flusher).Flush()
+					}
+					if tc.cancelParent {
 						cancel()
 					}
 					select {
@@ -196,15 +207,20 @@ func TestDPoPCredentials_TokenBudgetRetry(t *testing.T) {
 			require.NoError(t, err)
 			tokenURL, err := url.Parse(tokenSrv.URL + "/token")
 			require.NoError(t, err)
+			cfg := dpop_oauth2.RetryConfig{
+				MaxAttempts:  3,
+				InitialDelay: time.Millisecond,
+				MaxDelay:     time.Millisecond,
+				Timeout:      time.Minute,
+			}
+			if tc.status != 0 && !tc.cancelParent {
+				cfg.MaxAttempts = 1
+				cfg.Timeout = time.Second
+			}
 			ts, err := dpop_oauth2.NewTokenSource(proofer, tokenURL, "test-client", key,
 				dpop_oauth2.WithBaseContext(ctx),
 				dpop_oauth2.WithHTTPClient(tokenSrv.Client()),
-				dpop_oauth2.WithRetryConfig(dpop_oauth2.RetryConfig{
-					MaxAttempts:  3,
-					InitialDelay: time.Millisecond,
-					MaxDelay:     time.Millisecond,
-					Timeout:      time.Minute,
-				}),
+				dpop_oauth2.WithRetryConfig(cfg),
 			)
 			require.NoError(t, err)
 			client := newCredentialTestClient(t, ts)
@@ -213,12 +229,15 @@ func TestDPoPCredentials_TokenBudgetRetry(t *testing.T) {
 			defer rpcCancel()
 			_, err = client.TestUnary(rpcCtx, &pb.TestRequest{Message: "test"})
 			require.Equal(t, int32(1), calls.Load(), "the expired call must stop its internal retries")
-			if cancelParent {
+			if tc.cancelParent {
 				require.Equal(t, codes.Unauthenticated, status.Code(err), "caller cancellation must not trigger an outer retry")
 				return
 			}
 
 			require.Equal(t, codes.Unavailable, status.Code(err), "an owned-budget timeout must allow an outer retry")
+			if tc.status != 0 {
+				require.Contains(t, err.Error(), "failed to decode", "the timeout must occur after headers were returned")
+			}
 			response, err := client.TestUnary(rpcCtx, &pb.TestRequest{Message: "retry"})
 			require.NoError(t, err)
 			require.Equal(t, "retry", response.Message)

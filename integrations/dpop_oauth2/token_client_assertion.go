@@ -205,6 +205,14 @@ var errAttemptTimeout = errors.New("dpop_oauth2: token attempt timed out")
 
 var errTokenBudgetExceeded = fmt.Errorf("dpop_oauth2: token budget exceeded: %w", context.DeadlineExceeded)
 
+func isTokenSourceTimeout(ctx context.Context) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	cause := context.Cause(ctx)
+	return errors.Is(cause, errAttemptTimeout) || errors.Is(cause, errTokenBudgetExceeded)
+}
+
 func (c *tokenSource) Token() (*oauth2.Token, error) {
 	// ctx is the overall budget for this call. Every attempt runs under it,
 	// so the budget bounds total time across attempts and backoff.
@@ -367,8 +375,7 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 		// the underlying cause (context.Canceled, net errors, ...).
 		reqErr := fmt.Errorf("%w: failed to execute request: %w", ErrTokenRequestFailed, err)
 		if ctx.Err() != nil {
-			cause := context.Cause(ctx)
-			if !errors.Is(cause, errAttemptTimeout) && !errors.Is(cause, errTokenBudgetExceeded) {
+			if !isTokenSourceTimeout(ctx) {
 				return nil, nonce, reqErr
 			}
 		} else if errors.Is(err, context.Canceled) {
@@ -385,7 +392,11 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 			ErrorDescription string `json:"error_description"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
-			return nil, nonce, fmt.Errorf("%w: failed to decode error response: %v", ErrTokenRequestFailed, err)
+			decodeErr := fmt.Errorf("%w: failed to decode error response: %w", ErrTokenRequestFailed, err)
+			if isTokenSourceTimeout(ctx) {
+				decodeErr = markTransient(decodeErr)
+			}
+			return nil, nonce, decodeErr
 		}
 
 		if errorResp.Error == "use_dpop_nonce" {
@@ -423,7 +434,11 @@ func (c *tokenSource) tryToken(ctx context.Context, firstAttempt bool, retryNonc
 	token := &oauth2.Token{}
 	err = json.NewDecoder(resp.Body).Decode(token)
 	if err != nil {
-		return nil, nonce, fmt.Errorf("%w: failed to decode token response: %v", ErrInvalidToken, err)
+		decodeErr := fmt.Errorf("%w: failed to decode token response: %w", ErrInvalidToken, err)
+		if isTokenSourceTimeout(ctx) {
+			decodeErr = markTransient(fmt.Errorf("%w: %w", ErrTokenRequestFailed, decodeErr))
+		}
+		return nil, nonce, decodeErr
 	}
 
 	if token.AccessToken == "" {
